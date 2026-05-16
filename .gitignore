@@ -1,0 +1,36 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Build outputs / scratch
+*.zip
+*.tar.gz
+*.dll
+*.pdb
+*.log
+dist/
+build/
+out/
+tmp/
+_scratch/
+
+# Secrets / local config
+*.env
+.env
+.env.*
+!.env.example
+
+# Cosign keys (just in case — we use keyless OIDC, but never commit private keys)
+*.key
+cosign.*.key
+
+# Trivy / SBOM artifacts produced locally
+trivy-report.*
+sbom.*.json
+sbom.*.spdx.json
