@@ -1,0 +1,80 @@
+# plugins.lock — every artifact baked into the image and its content hash.
+#
+# This file is the human-readable mirror of the ARG values in Dockerfile. CI
+# verifies these hashes at build time; mismatch = build fails. Update both this
+# file and the matching ARG default in Dockerfile when bumping a pin.
+#
+# Format: YAML. Field meanings:
+#   sha256 — SHA-256 of the file as fetched (NOT the git-blob sha1 GitHub shows
+#            in its content API; use `sha256sum <file>` after downloading).
+#   source — exact commit-pinned raw URL the build will fetch.
+
+base_images:
+  builder:
+    image: docker.io/library/debian
+    tag: 12-slim
+    digest: sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
+  runtime:
+    image: mcr.microsoft.com/dotnet/runtime
+    tag: 9.0-bookworm-slim
+    digest: sha256:d955f883a9e648f0ff80b8bfe01e6b79874c296ef3bbcb5637c6981b64981a9a
+    notes: |
+      Provides .NET 9.0.16. TShock 5.2.4's apphost targets .NET 6 (EOL); we
+      coerce it onto 9.x via DOTNET_ROLL_FORWARD=LatestMajor. When TShock 6.x
+      (.NET 9 native) is stable for our Terraria target version, drop the
+      roll-forward env var.
+
+tshock:
+  version: 5.2.4
+  terraria_version: 1.4.4.9
+  channel: stable
+  notes: |
+    Chosen because the cluster's existing world is Terraria 1.4.4.9. TShock 6.x
+    requires Terraria 1.4.5.x; bumping there is a separate migration (world
+    save format change). 5.2.4 is the latest 5.x stable (2025-05-09).
+  asset: TShock-5.2.4-for-Terraria-1.4.4.9-linux-amd64-Release.zip
+  source: https://github.com/Pryaxis/TShock/releases/download/v5.2.4/TShock-5.2.4-for-Terraria-1.4.4.9-linux-amd64-Release.zip
+  sha256: 5c0bd0fc0777a535b6bb759c5bda4817549cdb02aee0ed371895eba26ff721f2
+  size: 25132958
+
+plugins:
+  repo: RenderBr/tShock-v5-plugins
+  commit: b67aa63bad1e7ab23d2688ec012b3b8ca4619163
+  files:
+    - name: History.dll
+      install_as: ServerPlugins/History.dll
+      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/History.dll
+      sha256: abf007230819613865a38c7ef689393bf2d41793aa5c70842b17381dda2ee4e0
+      size: 52224
+    - name: AntiSpam.dll
+      install_as: ServerPlugins/AntiSpam.dll
+      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/AntiSpam.dll
+      sha256: 7b665d558415ac283a78ffe96642994253e9a4192f77accfb273ecbe721244fb
+      size: 11264
+    - name: RegionView.dll
+      install_as: ServerPlugins/RegionView.dll
+      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/RegionView.dll
+      sha256: 3b156ff64eafc1d1f8ed0e694dee92a17457c606c02c0ea841b8c3e964302f57
+      size: 26624
+    # Renamed from "House Regions.dll" → HouseRegions.dll inside the image to
+    # avoid a path with a literal space (works fine, but trips shell scripts
+    # and breaks `find -name` predicates).
+    - name: House Regions.dll
+      install_as: ServerPlugins/HouseRegions.dll
+      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/House%20Regions.dll
+      sha256: 791b77ca0d9b2c367a2de5717df7813dad061c5386e12f94b796eff6388c00f6
+      size: 59904
+
+# Plugins deliberately NOT included on the first cut:
+#   - TerrariaChatRelay: needs a Discord bot token (and the chart can't
+#     currently feed secrets into the bake). Opt-in via overlay later.
+
+runtime_layout:
+  /opt/tshock/TShock.Server: entrypoint (ELF apphost, .NET 6 → rolled forward to .NET 9)
+  /opt/tshock/ServerPlugins/: baked plugin DLLs (read-only)
+  /opt/tshock/bin/: TShock + Terraria managed assemblies (read-only)
+  /opt/tshock/i18n/: TShock translations (read-only)
+  /opt/tshock/GeoIP.dat: GeoIP database shipped with TShock (read-only)
+  /serverdata/serverfiles/worlds/: chart-mounted PVC (writable, uid 1000)
+  /serverdata/serverfiles/tshock/: chart-mounted PVC (writable; holds config.json + sqlite)
+  /serverdata/serverfiles/logs/: chart-mounted PVC (writable)
