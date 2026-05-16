@@ -120,7 +120,7 @@ jobs:
       # there's zero ambiguity about which bits were scanned.
       - id: trivy
         name: Trivy CVE scan (HIGH/CRITICAL gate)
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.ref }}
           format: table
