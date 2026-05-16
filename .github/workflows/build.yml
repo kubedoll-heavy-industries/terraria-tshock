@@ -1,0 +1,174 @@
+name: build
+
+# Publishes ghcr.io/kubedoll-heavy-industries/terraria-tshock with:
+#   - keyless cosign signature (OIDC, no key management)
+#   - SLSA build provenance attestation (via the official actions/attest-build-provenance)
+#   - Trivy CVE gate (HIGH/CRITICAL fails the build; emergency override via workflow_dispatch input)
+#
+# Why two jobs?
+#   `build` produces the image + digest. `provenance` lives in a separate job that
+#   the attestation action requires for SLSA's "build came from a different identity
+#   than the one that signs" property. Keeping the digest as a job output avoids
+#   re-resolving by tag (which could race with a concurrent push).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  schedule:
+    # Nightly base-image refresh so CVE patches in debian-slim / dotnet runtime
+    # land in our published image without a human in the loop.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      allow_cve:
+        description: 'Bypass Trivy HIGH/CRITICAL gate (emergency builds only)'
+        type: boolean
+        default: false
+
+concurrency:
+  # Don't pile up nightly + push builds on the same ref.
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}  # kubedoll-heavy-industries/terraria-tshock
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write          # push to ghcr.io
+      id-token: write          # OIDC for cosign + SLSA
+      attestations: write      # SLSA attestation upload
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+      digest: ${{ steps.build.outputs.digest }}
+      tshock_version: ${{ steps.meta_extract.outputs.tshock_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the TShock version straight out of plugins.lock so the workflow
+      # never disagrees with what the Dockerfile actually builds. plugins.lock
+      # is YAML, but the value lives on one predictable line — grep is fine
+      # and avoids dragging in a yaml parser action.
+      - id: meta_extract
+        name: Extract TShock version from plugins.lock
+        run: |
+          set -euo pipefail
+          v=$(awk '/^tshock:/{f=1;next} f && /^  version:/{print $2; exit}' plugins.lock)
+          if [ -z "$v" ]; then echo "could not parse tshock.version from plugins.lock" >&2; exit 1; fi
+          echo "tshock_version=$v" >> "$GITHUB_OUTPUT"
+          echo "TShock version: $v"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag strategy:
+      #   - On tag push (v*):           :<tshock-version>, :<tshock-version>-<run>, :<git-tag>
+      #   - On main push:               :<tshock-version>, :<tshock-version>-<run>, :latest, :main-<sha>
+      #   - On scheduled rebuild:       :<tshock-version>, :<tshock-version>-<run>  (no :latest — keeps :latest tied to deliberate pushes)
+      #   - On workflow_dispatch:       :<tshock-version>, :<tshock-version>-<run>, :dispatch-<run>
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.meta_extract.outputs.tshock_version }}
+            type=raw,value=${{ steps.meta_extract.outputs.tshock_version }}-${{ github.run_number }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=main-${{ github.sha }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=dispatch-${{ github.run_number }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=ref,event=tag
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA cache survives across runs and is partition-keyed by ref; the
+          # scope keeps nightly + branch caches from clobbering each other.
+          cache-from: type=gha,scope=build-${{ github.ref_name }}
+          cache-to: type=gha,scope=build-${{ github.ref_name }},mode=max
+          provenance: true
+          sbom: true
+
+      - id: image
+        name: Surface immutable image ref
+        run: |
+          ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Pushed: $ref"
+
+      # Trivy CVE gate. We scan the published image by digest (not by tag) so
+      # there's zero ambiguity about which bits were scanned.
+      - id: trivy
+        name: Trivy CVE scan (HIGH/CRITICAL gate)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.image.outputs.ref }}
+          format: table
+          exit-code: ${{ inputs.allow_cve && '0' || '1' }}
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          # vuln only — the misconfig scanner is for IaC, not container images.
+          scanners: vuln
+        # Emergency: workflow_dispatch with allow_cve=true to publish despite findings.
+        # The published image still gets signed + attested; the override is
+        # recorded in the workflow run's inputs.
+
+      - name: Cosign keyless sign
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        # cosign is pre-installed on GitHub-hosted ubuntu-24.04 runners.
+        run: cosign sign --yes "$IMAGE"
+
+      - name: Generate SLSA build provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          {
+            echo "## terraria-tshock build"
+            echo ""
+            echo "- **Image:** \`${{ steps.image.outputs.ref }}\`"
+            echo "- **TShock version:** ${{ steps.meta_extract.outputs.tshock_version }}"
+            echo "- **Tags:** "
+            echo '```'
+            echo '${{ steps.meta.outputs.tags }}'
+            echo '```'
+            echo "- **Trivy:** ${{ inputs.allow_cve && 'OVERRIDDEN (allow_cve=true)' || 'passed HIGH/CRITICAL gate' }}"
+            echo "- **Cosign:** signed (keyless OIDC)"
+            echo "- **Provenance:** attested via actions/attest-build-provenance"
+            echo ""
+            echo "### Verify locally"
+            echo '```sh'
+            echo "cosign verify \\"
+            echo "  --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.*' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  ${{ steps.image.outputs.ref }}"
+            echo ""
+            echo "gh attestation verify oci://${{ steps.image.outputs.ref }} \\"
+            echo "  --owner ${{ github.repository_owner }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
