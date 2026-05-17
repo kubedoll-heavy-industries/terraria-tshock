@@ -51,7 +51,7 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
       tshock_version: ${{ steps.meta_extract.outputs.tshock_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       # Read the TShock version straight out of plugins.lock so the workflow
       # never disagrees with what the Dockerfile actually builds. plugins.lock
@@ -66,9 +66,9 @@ jobs:
           echo "tshock_version=$v" >> "$GITHUB_OUTPUT"
           echo "TShock version: $v"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -80,7 +80,7 @@ jobs:
       #   - On scheduled rebuild:       :<tshock-version>, :<tshock-version>-<run>  (no :latest — keeps :latest tied to deliberate pushes)
       #   - On workflow_dispatch:       :<tshock-version>, :<tshock-version>-<run>, :dispatch-<run>
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf  # v6.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -95,7 +95,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           platforms: linux/amd64
@@ -120,7 +120,7 @@ jobs:
       # there's zero ambiguity about which bits were scanned.
       - id: trivy
         name: Trivy CVE scan (HIGH/CRITICAL gate)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.ref }}
           format: table
@@ -207,7 +207,7 @@ jobs:
 
       - name: Upload TShock-generated config.json artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: tshock-config-${{ steps.meta_extract.outputs.tshock_version }}
           path: ${{ runner.temp }}/tshock-config-${{ steps.meta_extract.outputs.tshock_version }}.json
@@ -258,7 +258,7 @@ jobs:
           docker run --rm -v "$RUNNER_TEMP/serverdata-hardened:/d" alpine:3 rm -rf /d || true
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.7.0
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       - name: Cosign keyless sign
         env:
@@ -266,7 +266,7 @@ jobs:
         run: cosign sign --yes "$IMAGE"
 
       - name: Generate SLSA build provenance attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
