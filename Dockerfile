@@ -4,10 +4,10 @@
 #
 # Layers (top → bottom = least → most cache-busting):
 #   1. fetch      — Debian-slim, downloads + SHA256-verifies TShock and tini.
-#   2. plugins    — .NET 10 SDK, clones UnrealMultiple/TShockPlugin at a pinned
-#                   commit and builds 3 plugins against TShock 6.1.0 NuGet.
-#   3. runtime    — Ubuntu Resolute (26.04 LTS) chiseled (distroless). Copies
+#   2. runtime    — Ubuntu Resolute (26.04 LTS) chiseled (distroless). Copies
 #                   verified artifacts only. No shell, no apt, no package manager.
+#
+# (Day-1 ships with no baked plugins; see the long comment between stages.)
 #
 # Why chiseled?
 #   No shell = no shell-escape class of CVE. No package manager = nothing to
@@ -79,61 +79,27 @@ RUN set -eux; \
     find /work/tshock -type d -exec chmod 0555 {} +
 
 # ---------------------------------------------------------------------------
-# Stage 2: plugin builder. Clones UnrealMultiple/TShockPlugin at a pinned
-# commit (GPL-3.0) and builds 3 plugins against the TShock 6.1.0 NuGet
-# package the repo's template.targets references. The resulting DLLs land in
-# ./out/Release/ per their build convention.
+# (Stage 2 — plugin builder — intentionally absent for day-1.)
+#
+# Plan was to build v6-compatible History/HouseRegion/RegionView from the
+# UnrealMultiple/TShockPlugin source. Their build chain depends on a Roslyn
+# source generator (`SourceGen`) targeting Microsoft.CodeAnalysis.CSharp 5.3.0
+# which only ships with the .NET 10 SDK — but the .NET 10 SDK drops the net6.0
+# targeting pack that TShock 6.1 NuGet's transitive graph still references.
+# Net effect: no Microsoft-published SDK can both restore TShock 6.1 AND run
+# this analyzer cleanly. Fixing it requires either reverse-engineering their
+# publish-plugins-zip.ps1 build script or building the full 134-project
+# solution. Both are out of scope for the first 6.1 image cut.
+#
+# Image ships with /opt/tshock/ServerPlugins/TShockAPI.dll only (from upstream
+# TShock zip). Operators can mount custom plugins via the chart's plugin
+# volume. Re-instating baked plugins is a tracked follow-up.
 # ---------------------------------------------------------------------------
-# .NET 9 SDK (not 10) — TShock 6.1's transitive dep graph still references
-# net6.0 (e.g. via TerrariaServerAPI), and the .NET 10 SDK drops the net6
-# targeting pack. The .NET 9 SDK still ships net6/net7/net8/net9 packs and
-# can produce net9.0 plugin DLLs that load on the .NET 10 runtime via the
-# DOTNET_ROLL_FORWARD env var in the runtime stage.
-FROM mcr.microsoft.com/dotnet/sdk@sha256:087fc98e5c6ffcea6c3e276c135c4a6717c589d9509a09cc22e7c634830a4db8 AS plugins
-
-ARG PLUGINS_REPO=UnrealMultiple/TShockPlugin
-# Pinned commit: 2026-05-11. Refresh when bumping plugin set.
-ARG PLUGINS_COMMIT=221ff312bc357512af35fdafd5afdf130cf46951
-
-# Clone the exact commit (depth-1 ref-by-tag-on-the-fly: fetch the commit, no history).
-WORKDIR /src
-RUN git init -q . \
- && git remote add origin "https://github.com/${PLUGINS_REPO}.git" \
- && git fetch --depth 1 -q origin "${PLUGINS_COMMIT}" \
- && git checkout -q FETCH_HEAD \
- && git submodule update --init --recursive --depth 1 -q
-
-# Build each plugin. template.targets pins net9.0 + TShock 6.1.0 NuGet.
-# Output lands at /src/out/Release/<PluginName>.dll per their build convention.
-#
-# Build order matters: HouseRegion has a ProjectReference to LazyAPI, which
-# has a ProjectReference to SourceGen as an Analyzer (OutputItemType=Analyzer,
-# ReferenceOutputAssembly=false). SourceGen is a Roslyn source generator that
-# emits IProgressMap/ProgressHelper. Building HouseRegion in one shot fails
-# because the analyzer DLL isn't on disk yet when LazyAPI compiles. So build
-# SourceGen first (forces the analyzer DLL), then build the plugins one-by-one.
-#
-# Skipping --no-restore: `dotnet build` does its own restore that correctly
-# walks ProjectReferences (separate `dotnet restore <one csproj>` does not).
-RUN dotnet build src/SourceGen/SourceGen.csproj   -c Release --verbosity minimal
-RUN dotnet build src/History/History.csproj       -c Release --verbosity minimal
-RUN dotnet build src/HouseRegion/HouseRegion.csproj -c Release --verbosity minimal
-RUN dotnet build src/RegionView/RegionView.csproj -c Release --verbosity minimal
-
-# Stage the plugin DLLs in a clean tree we'll COPY into the runtime image.
-# Only the *plugin* DLLs — not TShockAPI/Terraria deps, which are already in
-# the TShock release zip. UnrealMultiple's build drops embedded i18n into the
-# DLL itself, so we don't need to ship the .mo files separately.
-RUN set -eux; \
-    mkdir -p /staged; \
-    cp /src/out/Release/History.dll      /staged/History.dll; \
-    cp /src/out/Release/HouseRegion.dll  /staged/HouseRegion.dll; \
-    cp /src/out/Release/RegionView.dll   /staged/RegionView.dll; \
-    chmod 0444 /staged/*.dll
 
 # ---------------------------------------------------------------------------
-# Stage 3: runtime image. Pinned by digest. Distroless — no shell, no apt.
-# Microsoft maintains this; nightly CI rebuild absorbs any base-layer CVE fix.
+# Stage 2 (renumbered): runtime image. Pinned by digest. Distroless — no
+# shell, no apt. Microsoft maintains this; nightly CI rebuild absorbs any
+# base-layer CVE fix.
 # ---------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/runtime@sha256:e47cc1e32cd37647d0505f9a3192a5cf1894e1fc70df0e7bcb133ce2fec5ea7f
 
@@ -153,10 +119,8 @@ LABEL org.opencontainers.image.title="terraria-tshock" \
 COPY --from=fetch --chown=root:root --chmod=0555 /work/tini /usr/local/bin/tini
 COPY --from=fetch --chown=root:root /work/tshock/ /opt/tshock/
 
-# Bake the v6-compatible plugins next to TShock's own ServerPlugins tree.
-# The TShock release zip ships ServerPlugins/TShockAPI.dll already; we just add
-# our 3 plugin DLLs alongside it.
-COPY --from=plugins --chown=root:root /staged/ /opt/tshock/ServerPlugins/
+# No baked plugins on day 1 — see Stage 2 deletion comment above.
+# /opt/tshock/ServerPlugins/ ships with TShockAPI.dll from the upstream zip.
 
 # Writable PVC tree. Chiseled has no shell, so we can't RUN mkdir + chown. The
 # WORKDIR directive below creates /serverdata/serverfiles automatically (Docker

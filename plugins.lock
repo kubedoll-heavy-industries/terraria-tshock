@@ -13,17 +13,8 @@ base_images:
     image: docker.io/library/debian
     tag: 12-slim
     digest: sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
-  plugin_builder:
-    image: mcr.microsoft.com/dotnet/sdk
-    tag: "9.0"
-    digest: sha256:087fc98e5c6ffcea6c3e276c135c4a6717c589d9509a09cc22e7c634830a4db8
-    notes: |
-      .NET 9 SDK (not 10). TShock 6.1's transitive dep graph references net6.0
-      (via TerrariaServerAPI etc.); the .NET 10 SDK dropped the net6 targeting
-      pack, so restoring against TShock 6.1 NuGet fails on net10 SDK with
-      "[MSBuild]::GetTargetFrameworkVersion(net6.0) cannot be evaluated". The
-      .NET 9 SDK still ships net6/net7/net8/net9 packs and produces net9.0
-      plugin DLLs that load on the .NET 10 runtime via roll-forward.
+  # (plugin_builder removed — day-1 image ships with no baked plugins. See
+  # `plugins:` section below for the sourcing analysis.)
   runtime:
     image: mcr.microsoft.com/dotnet/runtime
     tag: 10.0-resolute-chiseled
@@ -63,42 +54,41 @@ tini:
   size: 870496
 
 plugins:
-  source_repo: UnrealMultiple/TShockPlugin
-  source_commit: 221ff312bc357512af35fdafd5afdf130cf46951
-  source_date: 2026-05-11
-  license: GPL-3.0
-  build_target: TShock 6.1.0 NuGet (pinned in template.targets), net9.0
+  baked: []
   notes: |
-    Plugins are built from source in a multi-stage builder against the TShock
-    6.1.0 NuGet package — we do NOT consume UnrealMultiple's prebuilt Release
-    zip (last published 2024-04, predates TShock 6).
+    DAY-1 SHIPS WITH NO BAKED PLUGINS. The chart's plugin volume can be used
+    to mount custom plugins at runtime; the image's /opt/tshock/ServerPlugins/
+    contains only TShockAPI.dll from the upstream TShock 6.1.0 zip.
 
-    Sourcing change vs the 5.x image: RenderBr/tShock-v5-plugins is explicitly
-    v5-only and has no v6 sibling. UnrealMultiple/TShockPlugin is the active
-    v6 plugin collection (134 plugins, GPL-3.0, GitHub master updated weekly).
-  baked:
-    - name: History
-      install_as: ServerPlugins/History.dll
-      source: https://github.com/UnrealMultiple/TShockPlugin/tree/221ff312bc357512af35fdafd5afdf130cf46951/src/History
-      replaces: RenderBr/tShock-v5-plugins/History.dll (v5 image only)
-    - name: HouseRegion
-      install_as: ServerPlugins/HouseRegion.dll
-      source: https://github.com/UnrealMultiple/TShockPlugin/tree/221ff312bc357512af35fdafd5afdf130cf46951/src/HouseRegion
-      replaces: RenderBr/tShock-v5-plugins/House Regions.dll (v5 image only)
-    - name: RegionView
-      install_as: ServerPlugins/RegionView.dll
-      source: https://github.com/UnrealMultiple/TShockPlugin/tree/221ff312bc357512af35fdafd5afdf130cf46951/src/RegionView
-      replaces: RenderBr/tShock-v5-plugins/RegionView.dll (v5 image only)
-  intentionally_absent:
-    - name: AntiSpam
-      reason: |
-        UnrealMultiple's 134-plugin collection has no chat-rate-limit
-        equivalent for TShock 6.x. Day-one image ships without anti-spam;
-        sourcing a v6-compatible replacement is a tracked follow-up.
+    The original plan was to bake v6-compatible History/HouseRegion/RegionView
+    built from source against UnrealMultiple/TShockPlugin (the active v6
+    plugin collection, GPL-3.0, master updated weekly). That sourcing path
+    is blocked on a Roslyn version coupling:
+
+    - UnrealMultiple's build uses a Roslyn source generator (`SourceGen`,
+      OutputItemType=Analyzer) that depends on Microsoft.CodeAnalysis.CSharp 5.3.0
+    - Roslyn 5.x ships only with the .NET 10 SDK
+    - The .NET 10 SDK drops the net6.0 targeting pack that TShock 6.1's
+      transitive NuGet graph (TerrariaServerAPI etc.) still references
+    - No single Microsoft-published SDK can both restore TShock 6.1 AND
+      successfully load this source generator. Workarounds (reverse-engineering
+      their publish-plugins-zip.ps1 build script, or building the entire
+      134-project solution) are out of scope for the first 6.1 image cut.
+
+    RenderBr/tShock-v5-plugins (source of the 5.x image's baked plugins) is
+    hard-locked to TShock 5.x by ABI — not viable here.
+
+    Follow-up paths for re-baking plugins later:
+    1. Reverse-engineer UnrealMultiple's publish-plugins-zip.ps1 and embed
+       the same MSBuild incantation in our multi-stage builder.
+    2. Pull prebuilt DLLs from UnrealMultiple CI artifacts (currently not
+       retained past 90 days but they could be opted in).
+    3. magaflaca/LegacyPluginLoader v6-loads-v5 shim + RenderBr v5 DLLs
+       (highest convenience, highest abandonment risk — single-author shim).
 
 runtime_layout:
   /opt/tshock/TShock.Server: entrypoint (ELF apphost, net9.0 → rolled forward to .NET 10)
-  /opt/tshock/ServerPlugins/: baked plugin DLLs (read-only)
+  /opt/tshock/ServerPlugins/: TShockAPI.dll only (no baked plugins on day-1; chart's plugin volume can overlay)
   /opt/tshock/bin/: TShock + Terraria managed assemblies (read-only)
   /opt/tshock/i18n/: TShock translations (read-only)
   /opt/tshock/GeoIP.dat: GeoIP database shipped with TShock (read-only)
