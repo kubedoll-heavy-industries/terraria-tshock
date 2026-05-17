@@ -1,5 +1,14 @@
 # Operations notes
 
+> **Apple Silicon dev note.** Do NOT trust `docker run` smoke-test results
+> for this image on M-series Macs. Docker Desktop runs amd64 images under
+> qemu user-mode emulation, and qemu has known issues with modern .NET's
+> `Span<T>` / unsafe-code paths that surface as cryptic crashes during
+> OTAPI/Terraria's static init (`LanguageManager.ProcessCopyCommandsInTexts
+> NullReferenceException`, `qemu: uncaught target signal 6/11`, etc.).
+> These do **not** reproduce on real amd64 hardware. Use the CI smoke-test
+> job (`.github/workflows/build.yml`) for boot verification.
+
 ## Pod debugging
 
 The runtime image is `mcr.microsoft.com/dotnet/runtime:10.0-resolute`
