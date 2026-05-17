@@ -133,10 +133,12 @@ jobs:
         # The published image still gets signed + attested; the override is
         # recorded in the workflow run's inputs.
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
       - name: Cosign keyless sign
         env:
           IMAGE: ${{ steps.image.outputs.ref }}
-        # cosign is pre-installed on GitHub-hosted ubuntu-24.04 runners.
         run: cosign sign --yes "$IMAGE"
 
       - name: Generate SLSA build provenance attestation
