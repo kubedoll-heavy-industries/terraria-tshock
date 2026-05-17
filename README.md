@@ -22,11 +22,9 @@ This image replaces all of that with build-time pinning and supply-chain control
 
 ## Properties
 
-- **Distroless from PID 1.** Built on Microsoft's chiseled .NET 10 LTS runtime
-  (`mcr.microsoft.com/dotnet/runtime:10.0-resolute-chiseled`, Ubuntu 26.04 LTS).
-  No shell, no package manager, no setuid binaries. Container runs as
-  `uid 1000 / gid 1000`. See [`OPS.md`](./OPS.md) for the pod-debug pattern
-  (`kubectl debug` with an ephemeral container).
+- **Non-root from PID 1.** Built on Microsoft's .NET 10 LTS runtime
+  (`mcr.microsoft.com/dotnet/runtime:10.0-resolute`, Ubuntu 26.04 LTS).
+  Container runs as `uid 1000 / gid 1000`, no setuid binaries.
 - **TShock 6.1.0 for Terraria 1.4.5.6**, native .NET 9 apphost, rolled forward
   onto the .NET 10 LTS runtime via `DOTNET_ROLL_FORWARD=LatestMajor`.
 - **All inputs SHA256-pinned at build time** — TShock release zip and tini
@@ -38,8 +36,12 @@ This image replaces all of that with build-time pinning and supply-chain control
   from the upstream zip. The chart's plugin volume can overlay custom plugins
   at runtime. Re-baking is tracked as a follow-up — see [`plugins.lock`](./plugins.lock)
   for the sourcing analysis.
-- **No Docker `HEALTHCHECK`.** Chiseled image has no `nc`/shell. Use K8s
-  `readinessProbe.tcpSocket: { port: 7777 }` in the chart (already configured).
+- **TCP healthcheck on 7777** via `netcat-openbsd` for `docker run` smoke
+  tests. K8s `readinessProbe.tcpSocket: { port: 7777 }` is the authoritative
+  liveness check in cluster.
+- **Pod-level hardening** (chart-side, not image-side): `runAsNonRoot`,
+  `readOnlyRootFilesystem`, `capabilities.drop: [ALL]`, `seccompProfile:
+  RuntimeDefault`, restrictive NetworkPolicy egress. See [`OPS.md`](./OPS.md).
 - **amd64 only.** Our cluster nodes are amd64; arm64 can be added by extending
   the build matrix in `.github/workflows/build.yml`.
 

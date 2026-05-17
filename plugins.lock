@@ -17,24 +17,24 @@ base_images:
   # `plugins:` section below for the sourcing analysis.)
   runtime:
     image: mcr.microsoft.com/dotnet/runtime
-    tag: 10.0-resolute-chiseled-extra
-    digest: sha256:67e60ea4fb14921780de3533841ce9afc64dde30faaf83ae5bb7f5c71abd8871
+    tag: "10.0-resolute"
+    digest: sha256:20b918a3f49c838e57179475a16df93353c2f282be801e0135b699846bccc605
     notes: |
-      .NET 10 LTS runtime on Ubuntu 26.04 LTS (Resolute) chiseled-EXTRA. The
-      -extra variant adds ICU + tzdata data on top of the chiseled base.
-      Required: TShock's bundled OTAPI constructs CultureInfo("en-US") during
-      static init (Terraria.Localization.GameCulture.DefaultCulture); plain
-      chiseled ships in globalization-invariant mode, which throws on that
-      construction. -extra keeps the distroless property (no shell, no apt,
-      no package manager) while satisfying OTAPI's globalization requirement.
+      .NET 10 LTS runtime on Ubuntu 26.04 LTS (Resolute) — non-chiseled. Full
+      apt-based userspace with bash, coreutils, libc, ICU/tzdata. Earlier
+      iterations tried the -chiseled and -chiseled-extra variants for a
+      distroless property, but OTAPI/Terraria's globalization stack has
+      assumptions about userspace that we cannot satisfy without forking
+      OTAPI. Hardening is restored at the K8s podSpec level (see OPS.md):
+      runAsNonRoot, readOnlyRootFilesystem with /tmp tmpfs, drop ALL caps,
+      seccompProfile=RuntimeDefault, NetworkPolicy egress restriction.
 
       TShock 6.1.0 is a native net9.0 apphost; we coerce onto the .NET 10
       framework via DOTNET_ROLL_FORWARD=LatestMajor.
-      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false is set explicitly to override
-      the chiseled base's inherited =true (the -extra variant ships ICU data
-      so we can run in globalization-aware mode).
       DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp redirects TShock's single-file
-      apphost extract dir from / (read-only) to /tmp (world-writable).
+      apphost extract dir from / (which is read-only when the chart sets
+      readOnlyRootFilesystem=true; /tmp is a tmpfs emptyDir mounted by the
+      chart for this purpose).
 
 tshock:
   version: 6.1.0

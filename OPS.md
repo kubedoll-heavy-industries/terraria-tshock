@@ -1,36 +1,57 @@
 # Operations notes
 
-## Pod debugging — distroless image, no in-pod shell
+## Pod debugging
 
-The runtime image is `mcr.microsoft.com/dotnet/runtime:10.0-resolute-chiseled`
-(Ubuntu 26.04 LTS, distroless). It has no `sh`, no `bash`, no `apt`, no `ps`,
-no `ls`. This is intentional — no shell means no shell-escape class of
-vulnerability — but it means `kubectl exec -it ... -- sh` will not work.
-
-To poke at a running TShock pod, attach an ephemeral container with a full
-Ubuntu Resolute userspace and the same PID namespace as the TShock container:
+The runtime image is `mcr.microsoft.com/dotnet/runtime:10.0-resolute`
+(Ubuntu 26.04 LTS, full apt-based userspace). `kubectl exec` works:
 
 ```sh
-kubectl debug -it -n games <terraria-pod-name> \
-  --image=mcr.microsoft.com/dotnet/runtime:10.0-resolute \
-  --target=terraria \
-  -- bash
+kubectl exec -it -n games <terraria-pod-name> -- bash
 ```
 
-The `--target=terraria` flag shares PIDs with the named container so `ps`,
-`/proc/<pid>/`, `lsof`, etc. work against the running TShock process. Logs go
-via `kubectl logs` as usual (stdout/stderr is unchanged).
+We tried the chiseled and chiseled-extra variants for a distroless property,
+but OTAPI/Terraria's globalization stack has userspace assumptions that we
+couldn't satisfy without forking OTAPI. Hardening is restored at the K8s
+podSpec level — see "Pod-level hardening" below.
 
-For `nsenter`-style network debugging, swap `dotnet/runtime:10.0-resolute` for
-`nicolaka/netshoot` and the debug container will land in the pod's network
-namespace with tcpdump/curl/dig/etc.
+## Pod-level hardening (chart-side)
+
+The chart should set these on the main container:
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+volumes:
+  - name: tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 256Mi
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+```
+
+`/tmp` is required as a tmpfs emptyDir because `DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp`
+needs writable scratch for the TShock single-file apphost to unpack.
+
+A NetworkPolicy should restrict egress to:
+- UDP/53 (DNS) to cluster CoreDNS
+- TCP/443 to `steamcommunity.com` only if `terraria.secure: true` is set
+  (Steam-side auth handshake). Otherwise no egress needed.
 
 ## Healthcheck
 
-The image declares no Docker `HEALTHCHECK`. K8s `readinessProbe.tcpSocket`
-(port 7777) is the right place for liveness/readiness in cluster. The chart we
-deploy with already sets this; `docker run` smoke tests just rely on the
-process exit code.
+Image declares a Docker `HEALTHCHECK` (`nc -z 127.0.0.1 7777`) for
+`docker run` smoke tests. K8s `readinessProbe.tcpSocket: { port: 7777 }`
+remains the authoritative liveness check in cluster.
 
 ## Build-time pin set
 

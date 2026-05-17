@@ -4,23 +4,24 @@
 #
 # Layers (top → bottom = least → most cache-busting):
 #   1. fetch      — Debian-slim, downloads + SHA256-verifies TShock and tini.
-#   2. runtime    — Ubuntu Resolute (26.04 LTS) chiseled (distroless). Copies
-#                   verified artifacts only. No shell, no apt, no package manager.
+#   2. runtime    — Ubuntu Resolute (26.04 LTS) + .NET 10 LTS runtime. Full
+#                   apt-based base (NOT chiseled).
 #
 # (Day-1 ships with no baked plugins; see the long comment between stages.)
 #
-# Why chiseled?
-#   No shell = no shell-escape class of CVE. No package manager = nothing to
-#   update at runtime, nothing for Trivy to flag at the OS layer. The price is
-#   that pod debugging needs `kubectl debug --image=mcr.microsoft.com/dotnet/runtime:10.0-resolute
-#   --target=terraria` to attach an ephemeral container with userspace tools.
+# Why non-chiseled?
+#   Tried chiseled-extra first; it boots .NET fine but OTAPI's globalization
+#   stack has deeper assumptions about a real userspace than we can satisfy
+#   without forking OTAPI. Hardening posture is restored at the K8s podSpec
+#   level (runAsNonRoot, readOnlyRootFilesystem with /tmp tmpfs, drop ALL
+#   capabilities, seccomp RuntimeDefault, NetworkPolicy egress restriction).
 #   See OPS.md.
 #
 # Why glibc-based and not Alpine?
 #   TShock.Server is a glibc-linked ELF (NEEDED libc.so.6, libstdc++.so.6, ...).
 #   Alpine ships musl; running glibc binaries on Alpine needs the `gcompat`
-#   shim, which is not 100% glibc-compatible and adds an attack surface. Resolute
-#   chiseled gives us native glibc (Ubuntu 26.04 LTS) plus distroless ergonomics.
+#   shim, which is not 100% glibc-compatible and adds an attack surface.
+#   Resolute (Ubuntu 26.04 LTS) gives us native glibc.
 #
 # Why .NET 10 runtime, not .NET 9?
 #   TShock 6.1.0 ships as a net9.0 apphost. .NET 9 is STS (EOL May 2026); .NET
@@ -97,82 +98,106 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Stage 2 (renumbered): runtime image. Pinned by digest. Distroless — no
-# shell, no apt. Microsoft maintains this; nightly CI rebuild absorbs any
-# base-layer CVE fix.
+# Stage 2: runtime image. Ubuntu 26.04 LTS + .NET 10 LTS runtime, pinned by
+# digest. Microsoft maintains this; nightly CI rebuild absorbs any base-layer
+# CVE fix.
 # ---------------------------------------------------------------------------
-# 10.0-resolute-chiseled-EXTRA (not plain chiseled): TShock's bundled OTAPI
-# constructs CultureInfo("en-US") during static init, which throws under
-# globalization-invariant mode. The -extra variant ships ICU + tzdata data on
-# top of the chiseled base, satisfying that requirement without giving up the
-# distroless property (still no shell, no apt, no package manager).
-FROM mcr.microsoft.com/dotnet/runtime@sha256:67e60ea4fb14921780de3533841ce9afc64dde30faaf83ae5bb7f5c71abd8871
+FROM mcr.microsoft.com/dotnet/runtime@sha256:20b918a3f49c838e57179475a16df93353c2f282be801e0135b699846bccc605
 
 ARG TSHOCK_VERSION
 ARG TSHOCK_TERRARIA_VERSION
 
 LABEL org.opencontainers.image.title="terraria-tshock" \
-      org.opencontainers.image.description="Hardened TShock 6.1.0 server image for Terraria ${TSHOCK_TERRARIA_VERSION}, .NET 10 LTS on Ubuntu 26.04 chiseled" \
+      org.opencontainers.image.description="Hardened TShock 6.1.0 server image for Terraria ${TSHOCK_TERRARIA_VERSION}, .NET 10 LTS on Ubuntu 26.04" \
       org.opencontainers.image.source="https://github.com/kubedoll-heavy-industries/terraria-tshock" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Kubedoll Heavy Industries" \
       io.haruspex.tshock.version="${TSHOCK_VERSION}" \
       io.haruspex.terraria.version="${TSHOCK_TERRARIA_VERSION}"
 
-# Copy verified artifacts. Owner = root because the runtime image has no shell
-# to invoke `chown`; the runtime user (1000) reads but can't modify.
+# netcat-openbsd: ~50 KB, only used by a future docker-side HEALTHCHECK or
+# operator smoke tests. tini handles PID 1 + SIGTERM forwarding.
+# Set up uid 1000 as 'tshock' (Resolute's adduser ships as a Perl shim that
+# wants gettext; --no-create-home + --gecos="" + --disabled-password keeps it
+# light). Trim apt artefacts at the end so Trivy doesn't flag stale pkg meta.
+# Resolute ships an 'ubuntu' user at uid 1000 / gid 1000 with sudo + several
+# secondary groups (adm, dialout, cdrom, sudo, audio, video, plugdev). Remove
+# it cleanly first so the 1000:1000 slot is free, then create our minimal
+# 'tshock' user with no secondary groups and a nologin shell.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends netcat-openbsd \
+ && userdel --remove ubuntu 2>/dev/null || true \
+ && groupadd --system --gid 1000 tshock \
+ && useradd  --system --uid 1000 --gid 1000 --no-create-home \
+             --home /serverdata/serverfiles --shell /usr/sbin/nologin tshock \
+ && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/apt/archives/*
+
+# Copy verified artifacts. Owner = root, mode = read-only: the runtime user
+# (uid 1000) can read and execute but cannot modify the binary tree even if
+# something inside it is somehow exploited.
 COPY --from=fetch --chown=root:root --chmod=0555 /work/tini /usr/local/bin/tini
 COPY --from=fetch --chown=root:root /work/tshock/ /opt/tshock/
+
+# Make /opt/tshock itself writable by the runtime user so Terraria's pre-TShock
+# layer can create its hardcoded ServerLog.txt in cwd. We chmod only the
+# directory, not its contents (which stay 0555/0444 from the fetch stage's
+# `chmod -R a-w`). This is the narrowest possible workaround for OTAPI's
+# vanilla-Terraria ServerLog.txt-in-cwd assumption.
+RUN chmod 0755 /opt/tshock && chown 1000:1000 /opt/tshock
 
 # No baked plugins on day 1 — see Stage 2 deletion comment above.
 # /opt/tshock/ServerPlugins/ ships with TShockAPI.dll from the upstream zip.
 
-# Writable PVC tree. Chiseled has no shell, so we can't RUN mkdir + chown. The
-# WORKDIR directive below creates /serverdata/serverfiles automatically (Docker
-# creates parents); ownership defaults to root:root, but the chart mounts a PVC
-# at this path with fsGroup=1000, which Kubernetes uses to chown the volume
-# contents on mount. So the inherited root:root ownership of the in-image dir
-# is replaced at runtime by the PVC's fsGroup-owned tree. The chart's existing
-# init container creates worlds/, tshock/, logs/ subdirs on first start.
+# Pre-create the writable PVC tree owned by uid 1000. The chart mounts a PVC
+# at /serverdata/serverfiles with fsGroup=1000; subdirs are created by the
+# chart's init container OR (if we wire it via ConfigMap-render) by TShock
+# itself on first boot once it can write into the PVC.
+RUN mkdir -p /serverdata/serverfiles/worlds \
+             /serverdata/serverfiles/tshock \
+             /serverdata/serverfiles/logs \
+ && chown -R 1000:1000 /serverdata
 
 # Runtime env.
 # - DOTNET_ROLL_FORWARD=LatestMajor: lets TShock's net9 apphost load on the
 #   .NET 10 shared framework. Validated previously (net6→net10 roll-forward).
 # - DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp: TShock 6.1.0 ships as a single-file
 #   apphost (PublishSingleFile=true) which unpacks its embedded native libs
-#   (notably sqlite) to disk at startup. Default extract dir is /, which is
-#   read-only on the chiseled base. /tmp is world-writable in chiseled and
-#   safe for ephemeral extract — the apphost will re-extract on every boot
-#   into /tmp/.net/TShock.Server/<hash>/.
-# - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false: the -extra base ships ICU
-#   data; OTAPI requires a real (non-invariant) culture during static init
-#   (constructs CultureInfo("en-US") which throws under invariant mode).
-#   This env var overrides the inherited =true from the chiseled base.
-# - DOTNET_RUNNING_IN_CONTAINER inherited =true.
+#   (notably sqlite) to disk at startup. Default extract dir is /, which we
+#   set read-only at the K8s podSpec level (readOnlyRootFilesystem: true).
+#   /tmp is mounted as a tmpfs emptyDir by the chart for this purpose; the
+#   apphost re-extracts on every boot into /tmp/.net/TShock.Server/<hash>/.
+# - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false: OTAPI requires a real
+#   (non-invariant) culture during static init (constructs CultureInfo("en-US")
+#   which throws under invariant mode). Resolute non-chiseled ships full ICU
+#   so this works out of the box, but the env var documents the intent.
+# - DOTNET_RUNNING_IN_CONTAINER=true: explicit because we override the default.
 ENV DOTNET_ROLL_FORWARD=LatestMajor \
     DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
+    DOTNET_RUNNING_IN_CONTAINER=true \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1
 
 USER 1000:1000
-# WORKDIR must be /opt/tshock so Terraria's LanguageManager can resolve its
-# i18n + Content lookups relative to cwd (NullReferenceException on first boot
-# otherwise). Terraria's vanilla ServerLog.txt-in-cwd behavior is overridden
-# by TShock's -logpath flag, so cwd being read-only here is harmless.
-WORKDIR /opt/tshock
+# Run from the writable PVC, not the read-only /opt/tshock tree. Terraria's
+# pre-TShock layer hardcodes ServerLog.txt into the process cwd; if cwd is
+# /opt/tshock the process crashes on first write. Working from the PVC also
+# means any incidental "scratch file in cwd" behavior lands on persistent
+# storage instead of /tmp.
+WORKDIR /serverdata/serverfiles
 
 EXPOSE 7777/tcp
 VOLUME ["/serverdata/serverfiles"]
 
-# No HEALTHCHECK. K8s readinessProbe (tcpSocket: 7777) is the right place for
-# liveness in cluster, and chiseled has no shell/nc to back a Docker
-# HEALTHCHECK anyway. Pryaxis's own image makes the same choice.
+# TCP probe on 7777. K8s readinessProbe (tcpSocket: 7777) is still the
+# authoritative liveness check in cluster; this HEALTHCHECK is for `docker run`
+# smoke tests and operator one-offs.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD nc -z 127.0.0.1 7777 || exit 1
 
 # tini as PID 1 for clean SIGTERM → TShock graceful shutdown (saves world
-# before exit). The chiseled base's default ENTRYPOINT is `dotnet`; we
-# override entirely because TShock ships as a single-file apphost ELF, not
-# a managed dll.
+# before exit). We override the base's default ENTRYPOINT entirely because
+# TShock ships as a single-file apphost ELF, not a managed dll.
 ENTRYPOINT ["/usr/local/bin/tini", "--", "/opt/tshock/TShock.Server"]
 CMD ["-configpath", "/serverdata/serverfiles/tshock", \
      "-worldpath",  "/serverdata/serverfiles/worlds", \
