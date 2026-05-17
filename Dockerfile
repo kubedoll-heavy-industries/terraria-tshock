@@ -101,7 +101,12 @@ RUN set -eux; \
 # shell, no apt. Microsoft maintains this; nightly CI rebuild absorbs any
 # base-layer CVE fix.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime@sha256:e47cc1e32cd37647d0505f9a3192a5cf1894e1fc70df0e7bcb133ce2fec5ea7f
+# 10.0-resolute-chiseled-EXTRA (not plain chiseled): TShock's bundled OTAPI
+# constructs CultureInfo("en-US") during static init, which throws under
+# globalization-invariant mode. The -extra variant ships ICU + tzdata data on
+# top of the chiseled base, satisfying that requirement without giving up the
+# distroless property (still no shell, no apt, no package manager).
+FROM mcr.microsoft.com/dotnet/runtime@sha256:67e60ea4fb14921780de3533841ce9afc64dde30faaf83ae5bb7f5c71abd8871
 
 ARG TSHOCK_VERSION
 ARG TSHOCK_TERRARIA_VERSION
@@ -139,12 +144,14 @@ COPY --from=fetch --chown=root:root /work/tshock/ /opt/tshock/
 #   read-only on the chiseled base. /tmp is world-writable in chiseled and
 #   safe for ephemeral extract — the apphost will re-extract on every boot
 #   into /tmp/.net/TShock.Server/<hash>/.
-# - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT inherited =true from the chiseled
-#   base. We leave it true — chiseled doesn't ship ICU data and TShock's i18n
-#   uses .mo files that don't require .NET's globalization stack.
+# - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false: the -extra base ships ICU
+#   data; OTAPI requires a real (non-invariant) culture during static init
+#   (constructs CultureInfo("en-US") which throws under invariant mode).
+#   This env var overrides the inherited =true from the chiseled base.
 # - DOTNET_RUNNING_IN_CONTAINER inherited =true.
 ENV DOTNET_ROLL_FORWARD=LatestMajor \
     DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1
 
