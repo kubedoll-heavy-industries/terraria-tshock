@@ -156,7 +156,11 @@ ENV DOTNET_ROLL_FORWARD=LatestMajor \
     DOTNET_NOLOGO=1
 
 USER 1000:1000
-WORKDIR /serverdata/serverfiles
+# WORKDIR must be /opt/tshock so Terraria's LanguageManager can resolve its
+# i18n + Content lookups relative to cwd (NullReferenceException on first boot
+# otherwise). Terraria's vanilla ServerLog.txt-in-cwd behavior is overridden
+# by TShock's -logpath flag, so cwd being read-only here is harmless.
+WORKDIR /opt/tshock
 
 EXPOSE 7777/tcp
 VOLUME ["/serverdata/serverfiles"]
