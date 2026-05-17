@@ -103,15 +103,22 @@ RUN git init -q . \
  && git checkout -q FETCH_HEAD \
  && git submodule update --init --recursive --depth 1 -q
 
-# Build each plugin we want. template.targets pins net9.0 + TShock 6.1.0 NuGet,
-# so this restores ~50 MB of NuGet cache once and reuses it across the 3 builds.
+# Build each plugin. template.targets pins net9.0 + TShock 6.1.0 NuGet.
 # Output lands at /src/out/Release/<PluginName>.dll per their build convention.
-RUN dotnet restore src/History/History.csproj           --verbosity minimal \
- && dotnet restore src/HouseRegion/HouseRegion.csproj   --verbosity minimal \
- && dotnet restore src/RegionView/RegionView.csproj     --verbosity minimal
-RUN dotnet build   src/History/History.csproj         -c Release --no-restore --verbosity minimal \
- && dotnet build   src/HouseRegion/HouseRegion.csproj -c Release --no-restore --verbosity minimal \
- && dotnet build   src/RegionView/RegionView.csproj   -c Release --no-restore --verbosity minimal
+#
+# Build order matters: HouseRegion has a ProjectReference to LazyAPI, which
+# has a ProjectReference to SourceGen as an Analyzer (OutputItemType=Analyzer,
+# ReferenceOutputAssembly=false). SourceGen is a Roslyn source generator that
+# emits IProgressMap/ProgressHelper. Building HouseRegion in one shot fails
+# because the analyzer DLL isn't on disk yet when LazyAPI compiles. So build
+# SourceGen first (forces the analyzer DLL), then build the plugins one-by-one.
+#
+# Skipping --no-restore: `dotnet build` does its own restore that correctly
+# walks ProjectReferences (separate `dotnet restore <one csproj>` does not).
+RUN dotnet build src/SourceGen/SourceGen.csproj   -c Release --verbosity minimal
+RUN dotnet build src/History/History.csproj       -c Release --verbosity minimal
+RUN dotnet build src/HouseRegion/HouseRegion.csproj -c Release --verbosity minimal
+RUN dotnet build src/RegionView/RegionView.csproj -c Release --verbosity minimal
 
 # Stage the plugin DLLs in a clean tree we'll COPY into the runtime image.
 # Only the *plugin* DLLs — not TShockAPI/Terraria deps, which are already in
