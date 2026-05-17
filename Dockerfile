@@ -130,6 +130,11 @@ RUN apt-get update \
  && groupadd --system --gid 1000 tshock \
  && useradd  --system --uid 1000 --gid 1000 --no-create-home \
              --home /serverdata/serverfiles --shell /usr/sbin/nologin tshock \
+ # /usr/bin/pebble is Canonical's init/supervisor — we use tini as PID 1, so
+ # pebble is unused weight. Trivy flags it for Go stdlib CVEs (CVE-2026-33811,
+ # -33814, -39820, -39836, -42499) that the base image ships with. Remove it
+ # to eliminate the findings cleanly until MS refreshes the base digest.
+ && rm -f /usr/bin/pebble \
  && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/apt/archives/*
 
 # Copy verified artifacts. Owner = root, mode = read-only: the runtime user
