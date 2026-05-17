@@ -148,6 +148,11 @@ jobs:
       # NOTE: no `--rm` on the docker run. If the container crashes early we
       # need `docker logs` to fetch the crash output AFTER the container has
       # exited — `--rm` would have wiped it before we can read.
+      # Smoke-test passes if TShock prints its "now running" banner. We do NOT
+      # wait for TCP 7777 — that requires a world file (auto-created from
+      # config + worldname args), which is operator-state-dependent. The
+      # banner is the smallest "image actually executes the apphost past
+      # ModFramework + OTAPI + TShockAPI init" assertion.
       - name: Smoke test (baseline)
         env:
           IMAGE: ${{ steps.image.outputs.ref }}
@@ -159,17 +164,14 @@ jobs:
           # so a fresh subdir there isn't writable by uid 1000 by default.
           mkdir -p "$RUNNER_TEMP/serverdata-baseline"
           chmod 0777 "$RUNNER_TEMP/serverdata-baseline"
-          # Show the docker-run output directly so any image-pull or start
-          # failure surfaces here, not buried in subsequent steps.
           docker run -d --name "$NAME" \
               -v "$RUNNER_TEMP/serverdata-baseline:/serverdata/serverfiles" \
               --user 1000:1000 \
               "$IMAGE" -ignoreversion
-          # Wait up to 90s for TShock to bind 7777.
           ready=0
           for i in $(seq 1 90); do
-              if docker exec "$NAME" nc -z 127.0.0.1 7777 2>/dev/null; then
-                  echo "::notice::TShock TCP 7777 ready at t=${i}s (baseline)"
+              if docker logs "$NAME" 2>&1 | grep -q "TShock .* now running"; then
+                  echo "::notice::TShock banner detected at t=${i}s (baseline)"
                   ready=1
                   break
               fi
@@ -183,7 +185,7 @@ jobs:
               sleep 1
           done
           if [ "$ready" != "1" ]; then
-              echo "::error::TShock failed to bind 7777 within 90s (baseline)"
+              echo "::error::TShock failed to print 'now running' banner within 90s (baseline)"
               docker logs "$NAME" 2>&1 | tail -120
               docker rm -f "$NAME" >/dev/null
               exit 1
@@ -211,8 +213,8 @@ jobs:
               "$IMAGE" -ignoreversion
           ready=0
           for i in $(seq 1 90); do
-              if docker exec "$NAME" nc -z 127.0.0.1 7777 2>/dev/null; then
-                  echo "::notice::TShock TCP 7777 ready at t=${i}s (hardened)"
+              if docker logs "$NAME" 2>&1 | grep -q "TShock .* now running"; then
+                  echo "::notice::TShock banner detected at t=${i}s (hardened)"
                   ready=1
                   break
               fi
@@ -226,7 +228,7 @@ jobs:
               sleep 1
           done
           if [ "$ready" != "1" ]; then
-              echo "::error::TShock failed to bind 7777 within 90s (hardened)"
+              echo "::error::TShock failed to print 'now running' banner within 90s (hardened)"
               docker logs "$NAME" 2>&1 | tail -120
               docker rm -f "$NAME" >/dev/null
               exit 1
