@@ -145,37 +145,46 @@ jobs:
       #       1000, read-only root filesystem, /tmp tmpfs, drop ALL caps.
       #       Catches K8s-runtime-only issues that bare docker run misses.
       # Either failure fails the job. Total budget ~120s for a clean boot.
+      # NOTE: no `--rm` on the docker run. If the container crashes early we
+      # need `docker logs` to fetch the crash output AFTER the container has
+      # exited — `--rm` would have wiped it before we can read.
       - name: Smoke test (baseline)
         env:
           IMAGE: ${{ steps.image.outputs.ref }}
         run: |
           set -eo pipefail
-          docker run --rm -d --name tshock-smoke-baseline \
+          NAME=tshock-smoke-baseline
+          mkdir -p "$RUNNER_TEMP/serverdata-baseline"
+          # Show the docker-run output directly so any image-pull or start
+          # failure surfaces here, not buried in subsequent steps.
+          docker run -d --name "$NAME" \
               -v "$RUNNER_TEMP/serverdata-baseline:/serverdata/serverfiles" \
               --user 1000:1000 \
               "$IMAGE" -ignoreversion
           # Wait up to 90s for TShock to bind 7777.
           ready=0
           for i in $(seq 1 90); do
-              if docker exec tshock-smoke-baseline nc -z 127.0.0.1 7777 2>/dev/null; then
+              if docker exec "$NAME" nc -z 127.0.0.1 7777 2>/dev/null; then
                   echo "::notice::TShock TCP 7777 ready at t=${i}s (baseline)"
                   ready=1
                   break
               fi
-              if ! docker inspect tshock-smoke-baseline --format '{{.State.Running}}' | grep -q true; then
-                  echo "::error::container exited before reaching ready (baseline)"
-                  docker logs tshock-smoke-baseline 2>&1 | tail -80
+              if [ "$(docker inspect "$NAME" --format '{{.State.Running}}')" != "true" ]; then
+                  ec=$(docker inspect "$NAME" --format '{{.State.ExitCode}}')
+                  echo "::error::container exited (ExitCode=$ec) before reaching ready (baseline)"
+                  docker logs "$NAME" 2>&1 | tail -120
+                  docker rm -f "$NAME" >/dev/null
                   exit 1
               fi
               sleep 1
           done
           if [ "$ready" != "1" ]; then
               echo "::error::TShock failed to bind 7777 within 90s (baseline)"
-              docker logs tshock-smoke-baseline 2>&1 | tail -80
-              docker stop tshock-smoke-baseline >/dev/null
+              docker logs "$NAME" 2>&1 | tail -120
+              docker rm -f "$NAME" >/dev/null
               exit 1
           fi
-          docker stop tshock-smoke-baseline >/dev/null
+          docker rm -f "$NAME" >/dev/null
           rm -rf "$RUNNER_TEMP/serverdata-baseline"
 
       - name: Smoke test (hardened — matches K8s podSpec)
@@ -183,10 +192,11 @@ jobs:
           IMAGE: ${{ steps.image.outputs.ref }}
         run: |
           set -eo pipefail
+          NAME=tshock-smoke-hardened
           mkdir -p "$RUNNER_TEMP/serverdata-hardened"
           # tmpfs for /tmp because DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp and the
           # read-only root would otherwise refuse the bundle extract.
-          docker run --rm -d --name tshock-smoke-hardened \
+          docker run -d --name "$NAME" \
               -v "$RUNNER_TEMP/serverdata-hardened:/serverdata/serverfiles" \
               --user 1000:1000 \
               --read-only \
@@ -196,25 +206,27 @@ jobs:
               "$IMAGE" -ignoreversion
           ready=0
           for i in $(seq 1 90); do
-              if docker exec tshock-smoke-hardened nc -z 127.0.0.1 7777 2>/dev/null; then
+              if docker exec "$NAME" nc -z 127.0.0.1 7777 2>/dev/null; then
                   echo "::notice::TShock TCP 7777 ready at t=${i}s (hardened)"
                   ready=1
                   break
               fi
-              if ! docker inspect tshock-smoke-hardened --format '{{.State.Running}}' | grep -q true; then
-                  echo "::error::container exited before reaching ready (hardened)"
-                  docker logs tshock-smoke-hardened 2>&1 | tail -80
+              if [ "$(docker inspect "$NAME" --format '{{.State.Running}}')" != "true" ]; then
+                  ec=$(docker inspect "$NAME" --format '{{.State.ExitCode}}')
+                  echo "::error::container exited (ExitCode=$ec) before reaching ready (hardened)"
+                  docker logs "$NAME" 2>&1 | tail -120
+                  docker rm -f "$NAME" >/dev/null
                   exit 1
               fi
               sleep 1
           done
           if [ "$ready" != "1" ]; then
               echo "::error::TShock failed to bind 7777 within 90s (hardened)"
-              docker logs tshock-smoke-hardened 2>&1 | tail -80
-              docker stop tshock-smoke-hardened >/dev/null
+              docker logs "$NAME" 2>&1 | tail -120
+              docker rm -f "$NAME" >/dev/null
               exit 1
           fi
-          docker stop tshock-smoke-hardened >/dev/null
+          docker rm -f "$NAME" >/dev/null
           rm -rf "$RUNNER_TEMP/serverdata-hardened"
 
       - name: Install cosign
