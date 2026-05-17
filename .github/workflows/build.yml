@@ -154,7 +154,11 @@ jobs:
         run: |
           set -eo pipefail
           NAME=tshock-smoke-baseline
+          # The container runs as uid 1000 and needs to write into the volume.
+          # $RUNNER_TEMP belongs to the GHA runner user (uid 1001 typically),
+          # so a fresh subdir there isn't writable by uid 1000 by default.
           mkdir -p "$RUNNER_TEMP/serverdata-baseline"
+          chmod 0777 "$RUNNER_TEMP/serverdata-baseline"
           # Show the docker-run output directly so any image-pull or start
           # failure surfaces here, not buried in subsequent steps.
           docker run -d --name "$NAME" \
@@ -194,6 +198,7 @@ jobs:
           set -eo pipefail
           NAME=tshock-smoke-hardened
           mkdir -p "$RUNNER_TEMP/serverdata-hardened"
+          chmod 0777 "$RUNNER_TEMP/serverdata-hardened"
           # tmpfs for /tmp because DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp and the
           # read-only root would otherwise refuse the bundle extract.
           docker run -d --name "$NAME" \
