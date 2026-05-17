@@ -4,10 +4,10 @@
 #
 # Layers (top → bottom = least → most cache-busting):
 #   1. fetch      — Debian-slim, downloads + SHA256-verifies TShock and tini.
-#   2. runtime    — Ubuntu Resolute (26.04 LTS) + .NET 10 LTS runtime. Full
+#   2. plugins    — .NET 9 SDK, builds History/HouseRegion/RegionView from
+#                   UnrealMultiple/TShockPlugin source (pinned commit).
+#   3. runtime    — Ubuntu Resolute (26.04 LTS) + .NET 10 LTS runtime. Full
 #                   apt-based base (NOT chiseled).
-#
-# (Day-1 ships with no baked plugins; see the long comment between stages.)
 #
 # Why non-chiseled?
 #   Tried chiseled-extra first; it boots .NET fine but OTAPI's globalization
@@ -80,22 +80,73 @@ RUN set -eux; \
     find /work/tshock -type d -exec chmod 0555 {} +
 
 # ---------------------------------------------------------------------------
-# (Stage 2 — plugin builder — intentionally absent for day-1.)
+# Stage 2: plugin builder. Clones UnrealMultiple/TShockPlugin at a pinned
+# commit and builds the three v6-compatible plugins we want baked into the
+# image: History, HouseRegion, RegionView. Uses .NET 9 SDK exclusively —
+# matches upstream CI (.github/workflows/build.yml: dotnet-version 9.x).
 #
-# Plan was to build v6-compatible History/HouseRegion/RegionView from the
-# UnrealMultiple/TShockPlugin source. Their build chain depends on a Roslyn
-# source generator (`SourceGen`) targeting Microsoft.CodeAnalysis.CSharp 5.3.0
-# which only ships with the .NET 10 SDK — but the .NET 10 SDK drops the net6.0
-# targeting pack that TShock 6.1 NuGet's transitive graph still references.
-# Net effect: no Microsoft-published SDK can both restore TShock 6.1 AND run
-# this analyzer cleanly. Fixing it requires either reverse-engineering their
-# publish-plugins-zip.ps1 build script or building the full 134-project
-# solution. Both are out of scope for the first 6.1 image cut.
+# Earlier notes claimed an SDK-version coupling required .NET 10 SDK for the
+# Roslyn source generator (Microsoft.CodeAnalysis.CSharp 5.3.0). That was a
+# misread: upstream CI ships green on .NET 9 SDK alone, and source inspection
+# confirms our three target plugins do not consume any SourceGen-emitted
+# types (ProgressHelper/IProgressMap are only referenced by LazyAPI and
+# CaiBotLite, not by History/HouseRegion/RegionView's own code). HouseRegion
+# does transitively pull in LazyAPI as a project ref, which forces the
+# SourceGen build; upstream proves that build works under net9.0 SDK.
 #
-# Image ships with /opt/tshock/ServerPlugins/TShockAPI.dll only (from upstream
-# TShock zip). Operators can mount custom plugins via the chart's plugin
-# volume. Re-instating baked plugins is a tracked follow-up.
+# AntiSpam: no v6-compatible equivalent in UnrealMultiple's collection (or
+# anywhere we could find). Skipped — recorded in plugins.lock.
 # ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS plugins
+
+# Pin the UnrealMultiple/TShockPlugin commit; bump deliberately, never float.
+ARG TSHOCK_PLUGINS_COMMIT=221ff312bc357512af35fdafd5afdf130cf46951
+ARG TSHOCK_PLUGINS_REPO=https://github.com/UnrealMultiple/TShockPlugin.git
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN set -eux; \
+    git init; \
+    git remote add origin "${TSHOCK_PLUGINS_REPO}"; \
+    git fetch --depth 1 origin "${TSHOCK_PLUGINS_COMMIT}"; \
+    git checkout FETCH_HEAD; \
+    git rev-parse HEAD > /src/.plugins-commit
+
+# Build the three target plugins. Each `dotnet build` restores + compiles its
+# csproj (and any project refs — HouseRegion pulls LazyAPI + SourceGen). We
+# intentionally do NOT build Plugin.slnx (the 134-project solution) — that
+# would drag in submodules and unrelated plugins we don't ship.
+#
+# `--use-current-runtime` is omitted; default RID is fine. UseAppHost=false
+# would be wrong here — we want managed assemblies for ServerPlugins, not
+# apphosts. The default for non-Exe csprojs is what we want.
+RUN set -eux; \
+    for proj in src/History/History.csproj \
+                src/HouseRegion/HouseRegion.csproj \
+                src/RegionView/RegionView.csproj; do \
+        echo ">>> building $proj"; \
+        dotnet build "$proj" -c Release -v minimal; \
+    done
+
+# Collect the produced DLLs. template.targets pins OutputPath to
+# ../../out/$(Configuration) which lands at /src/out/Release/.
+RUN set -eux; \
+    mkdir -p /plugins; \
+    cp /src/out/Release/History.dll      /plugins/History.dll; \
+    cp /src/out/Release/HouseRegion.dll  /plugins/HouseRegion.dll; \
+    cp /src/out/Release/RegionView.dll   /plugins/RegionView.dll; \
+    # LazyAPI is HouseRegion's dependency — ship it alongside.
+    cp /src/out/Release/LazyAPI.dll      /plugins/LazyAPI.dll; \
+    # linq2db is LazyAPI's runtime dep; CopyLocalLockFileAssemblies=true
+    # (from template.targets) means it lands in the same out dir.
+    cp /src/out/Release/linq2db.dll      /plugins/linq2db.dll; \
+    chmod 0444 /plugins/*.dll; \
+    # Record SHA256 of every shipped DLL for plugins.lock cross-check.
+    sha256sum /plugins/*.dll > /plugins/SHA256SUMS; \
+    cat /plugins/SHA256SUMS
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime image. Ubuntu 26.04 LTS + .NET 10 LTS runtime, pinned by
@@ -143,8 +194,10 @@ RUN apt-get update \
 COPY --from=fetch --chown=root:root --chmod=0555 /work/tini /usr/local/bin/tini
 COPY --from=fetch --chown=root:root /work/tshock/ /opt/tshock/
 
-# No baked plugins on day 1 — see Stage 2 deletion comment above.
-# /opt/tshock/ServerPlugins/ ships with TShockAPI.dll from the upstream zip.
+# Baked plugins. /opt/tshock/ServerPlugins/ already contains TShockAPI.dll
+# from the upstream zip; we drop our additions next to it. Owner=root,
+# mode=read-only — uid 1000 can load them but cannot rewrite.
+COPY --from=plugins --chown=root:root --chmod=0444 /plugins/*.dll /opt/tshock/ServerPlugins/
 
 # Pre-create the writable PVC tree owned by uid 1000. The chart mounts a PVC
 # at /serverdata/serverfiles with fsGroup=1000; subdirs are created by the

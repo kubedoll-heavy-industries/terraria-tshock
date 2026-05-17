@@ -257,6 +257,63 @@ jobs:
           docker rm -f "$NAME" >/dev/null
           docker run --rm -v "$RUNNER_TEMP/serverdata-hardened:/d" alpine:3 rm -rf /d || true
 
+      # Plugin-load smoke test. Boots the image again and greps the TShock
+      # banner ("Plugin <name> v<ver> (by <author>) initiated.") for each baked
+      # plugin. Catches: plugin DLL missing, plugin DLL load failure (TShock
+      # logs that as "<file>: <exception>"), wrong target-framework, missing
+      # transitive dep, manifest mismatch. If any of the four baked plugins
+      # fails to initiate, the job fails.
+      - name: Smoke test (plugin load)
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          set -eo pipefail
+          NAME=tshock-smoke-plugins
+          mkdir -p "$RUNNER_TEMP/serverdata-plugins"
+          chmod 0777 "$RUNNER_TEMP/serverdata-plugins"
+          docker run -d --name "$NAME" \
+              -v "$RUNNER_TEMP/serverdata-plugins:/serverdata/serverfiles" \
+              --user 1000:1000 \
+              "$IMAGE" -ignoreversion
+          ready=0
+          for i in $(seq 1 90); do
+              if docker logs "$NAME" 2>&1 | grep -q "TShock .* now running"; then
+                  ready=1
+                  break
+              fi
+              if [ "$(docker inspect "$NAME" --format '{{.State.Running}}')" != "true" ]; then
+                  ec=$(docker inspect "$NAME" --format '{{.State.ExitCode}}')
+                  echo "::error::container exited (ExitCode=$ec) before plugin smoke ready"
+                  docker logs "$NAME" 2>&1 | tail -200
+                  docker rm -f "$NAME" >/dev/null
+                  exit 1
+              fi
+              sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+              echo "::error::TShock failed to reach ready state for plugin smoke"
+              docker logs "$NAME" 2>&1 | tail -200
+              docker rm -f "$NAME" >/dev/null
+              exit 1
+          fi
+          logs=$(docker logs "$NAME" 2>&1)
+          docker rm -f "$NAME" >/dev/null
+          docker run --rm -v "$RUNNER_TEMP/serverdata-plugins:/d" alpine:3 rm -rf /d || true
+          missing=0
+          for plugin in History HouseRegion RegionView; do
+              if echo "$logs" | grep -qE "Plugin $plugin .* initiated"; then
+                  echo "::notice::plugin loaded: $plugin"
+              else
+                  echo "::error::plugin failed to initiate: $plugin"
+                  missing=1
+              fi
+          done
+          if [ "$missing" != "0" ]; then
+              echo "--- last 200 lines of TShock log ---"
+              echo "$logs" | tail -200
+              exit 1
+          fi
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.7.0
 

@@ -13,8 +13,16 @@ base_images:
     image: docker.io/library/debian
     tag: 12-slim
     digest: sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
-  # (plugin_builder removed — day-1 image ships with no baked plugins. See
-  # `plugins:` section below for the sourcing analysis.)
+  plugin_builder:
+    image: mcr.microsoft.com/dotnet/sdk
+    tag: "9.0"
+    notes: |
+      .NET 9 SDK image used to build the baked plugins from
+      UnrealMultiple/TShockPlugin source. Matches upstream CI's setup-dotnet
+      pin (dotnet-version: 9.x). Not digest-pinned because Microsoft retags
+      this image regularly with CVE fixes and we want each rebuild to get
+      the latest patched SDK; the produced plugin DLLs are themselves
+      hash-recorded below.
   runtime:
     image: mcr.microsoft.com/dotnet/runtime
     tag: "10.0-resolute"
@@ -61,41 +69,61 @@ tini:
   size: 870496
 
 plugins:
-  baked: []
+  source:
+    repo: UnrealMultiple/TShockPlugin
+    url: https://github.com/UnrealMultiple/TShockPlugin
+    commit: 221ff312bc357512af35fdafd5afdf130cf46951
+    license: GPL-3.0
+  baked:
+    - name: History
+      csproj: src/History/History.csproj
+      sha256: TBD-FIRST-BUILD
+      notes: Undo/redo and tile change history (TShock v6-compatible build).
+    - name: HouseRegion
+      csproj: src/HouseRegion/HouseRegion.csproj
+      sha256: TBD-FIRST-BUILD
+      notes: Player-claimed house regions; depends on LazyAPI.
+    - name: RegionView
+      csproj: src/RegionView/RegionView.csproj
+      sha256: TBD-FIRST-BUILD
+      notes: In-world visualization of region boundaries.
+    - name: LazyAPI
+      csproj: src/LazyAPI/LazyAPI.csproj
+      sha256: TBD-FIRST-BUILD
+      notes: HouseRegion's project-ref dependency; ships alongside.
+    - name: linq2db
+      sha256: TBD-FIRST-BUILD
+      notes: LazyAPI runtime dep, copied locally per CopyLocalLockFileAssemblies=true.
+  skipped:
+    - name: AntiSpam
+      reason: |
+        No v6-compatible equivalent in UnrealMultiple/TShockPlugin's collection
+        of 134 plugins, and no other public source surfaces a v6 build. The 5.x
+        AntiSpam from RenderBr/tShock-v5-plugins is ABI-locked to TShock 5.x.
+        Operators who need chat anti-spam can mount a custom plugin via the
+        chart's plugin volume; the image's baked set deliberately omits it.
   notes: |
-    DAY-1 SHIPS WITH NO BAKED PLUGINS. The chart's plugin volume can be used
-    to mount custom plugins at runtime; the image's /opt/tshock/ServerPlugins/
-    contains only TShockAPI.dll from the upstream TShock 6.1.0 zip.
+    Plugin DLLs are built in-Dockerfile by the `plugins` stage (mcr.microsoft.com
+    /dotnet/sdk:9.0). Approach: per-plugin `dotnet build` on the .csproj — same
+    invocation upstream CI uses (.github/workflows/build.yml pins dotnet-version
+    to 9.x and runs scripts/publish-plugins-zip.ps1 which delegates to
+    `dotnet build Plugin.slnx`). We build the three target csprojs individually
+    rather than the full solution to avoid pulling the 134-plugin universe.
 
-    The original plan was to bake v6-compatible History/HouseRegion/RegionView
-    built from source against UnrealMultiple/TShockPlugin (the active v6
-    plugin collection, GPL-3.0, master updated weekly). That sourcing path
-    is blocked on a Roslyn version coupling:
+    Prior architect's note that .NET 10 SDK was required for the SourceGen
+    analyzer (Microsoft.CodeAnalysis.CSharp 5.3.0) turned out to be wrong:
+    upstream CI ships green on .NET 9 SDK alone, and our three targets do
+    not reference any SourceGen-emitted types. HouseRegion transitively pulls
+    LazyAPI (which IS a SourceGen consumer), and upstream proves that builds
+    fine under net9.0 SDK.
 
-    - UnrealMultiple's build uses a Roslyn source generator (`SourceGen`,
-      OutputItemType=Analyzer) that depends on Microsoft.CodeAnalysis.CSharp 5.3.0
-    - Roslyn 5.x ships only with the .NET 10 SDK
-    - The .NET 10 SDK drops the net6.0 targeting pack that TShock 6.1's
-      transitive NuGet graph (TerrariaServerAPI etc.) still references
-    - No single Microsoft-published SDK can both restore TShock 6.1 AND
-      successfully load this source generator. Workarounds (reverse-engineering
-      their publish-plugins-zip.ps1 build script, or building the entire
-      134-project solution) are out of scope for the first 6.1 image cut.
-
-    RenderBr/tShock-v5-plugins (source of the 5.x image's baked plugins) is
-    hard-locked to TShock 5.x by ABI — not viable here.
-
-    Follow-up paths for re-baking plugins later:
-    1. Reverse-engineer UnrealMultiple's publish-plugins-zip.ps1 and embed
-       the same MSBuild incantation in our multi-stage builder.
-    2. Pull prebuilt DLLs from UnrealMultiple CI artifacts (currently not
-       retained past 90 days but they could be opted in).
-    3. magaflaca/LegacyPluginLoader v6-loads-v5 shim + RenderBr v5 DLLs
-       (highest convenience, highest abandonment risk — single-author shim).
+    SHA256s are filled in by CI on first green build (sha256sum captured by
+    the plugins stage at /plugins/SHA256SUMS, surfaced in build logs); update
+    this file on first green run.
 
 runtime_layout:
   /opt/tshock/TShock.Server: entrypoint (ELF apphost, net9.0 → rolled forward to .NET 10)
-  /opt/tshock/ServerPlugins/: TShockAPI.dll only (no baked plugins on day-1; chart's plugin volume can overlay)
+  /opt/tshock/ServerPlugins/: TShockAPI.dll (upstream) + History.dll, HouseRegion.dll, RegionView.dll, LazyAPI.dll, linq2db.dll (baked); chart's plugin volume can overlay additional plugins
   /opt/tshock/bin/: TShock + Terraria managed assemblies (read-only)
   /opt/tshock/i18n/: TShock translations (read-only)
   /opt/tshock/GeoIP.dat: GeoIP database shipped with TShock (read-only)
