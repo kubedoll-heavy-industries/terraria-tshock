@@ -17,17 +17,24 @@ base_images:
   # `plugins:` section below for the sourcing analysis.)
   runtime:
     image: mcr.microsoft.com/dotnet/runtime
-    tag: 10.0-resolute-chiseled
-    digest: sha256:e47cc1e32cd37647d0505f9a3192a5cf1894e1fc70df0e7bcb133ce2fec5ea7f
+    tag: 10.0-resolute-chiseled-extra
+    digest: sha256:67e60ea4fb14921780de3533841ce9afc64dde30faaf83ae5bb7f5c71abd8871
     notes: |
-      .NET 10 LTS runtime on Ubuntu 26.04 LTS (Resolute) chiseled (distroless).
-      No shell, no package manager, no apt. Newest available LTS base — 26.04
-      shipped April 2026 and Microsoft published the chiseled variant promptly.
+      .NET 10 LTS runtime on Ubuntu 26.04 LTS (Resolute) chiseled-EXTRA. The
+      -extra variant adds ICU + tzdata data on top of the chiseled base.
+      Required: TShock's bundled OTAPI constructs CultureInfo("en-US") during
+      static init (Terraria.Localization.GameCulture.DefaultCulture); plain
+      chiseled ships in globalization-invariant mode, which throws on that
+      construction. -extra keeps the distroless property (no shell, no apt,
+      no package manager) while satisfying OTAPI's globalization requirement.
+
       TShock 6.1.0 is a native net9.0 apphost; we coerce onto the .NET 10
       framework via DOTNET_ROLL_FORWARD=LatestMajor.
-      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true is inherited from the base —
-      chiseled ships without ICU; TShock's i18n uses .mo files that don't
-      need .NET's globalization stack, so this is fine.
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false is set explicitly to override
+      the chiseled base's inherited =true (the -extra variant ships ICU data
+      so we can run in globalization-aware mode).
+      DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp redirects TShock's single-file
+      apphost extract dir from / (read-only) to /tmp (world-writable).
 
 tshock:
   version: 6.1.0
