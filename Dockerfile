@@ -143,13 +143,6 @@ RUN apt-get update \
 COPY --from=fetch --chown=root:root --chmod=0555 /work/tini /usr/local/bin/tini
 COPY --from=fetch --chown=root:root /work/tshock/ /opt/tshock/
 
-# Make /opt/tshock itself writable by the runtime user so Terraria's pre-TShock
-# layer can create its hardcoded ServerLog.txt in cwd. We chmod only the
-# directory, not its contents (which stay 0555/0444 from the fetch stage's
-# `chmod -R a-w`). This is the narrowest possible workaround for OTAPI's
-# vanilla-Terraria ServerLog.txt-in-cwd assumption.
-RUN chmod 0755 /opt/tshock && chown 1000:1000 /opt/tshock
-
 # No baked plugins on day 1 — see Stage 2 deletion comment above.
 # /opt/tshock/ServerPlugins/ ships with TShockAPI.dll from the upstream zip.
 
