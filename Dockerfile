@@ -133,11 +133,18 @@ COPY --from=fetch --chown=root:root /work/tshock/ /opt/tshock/
 # Runtime env.
 # - DOTNET_ROLL_FORWARD=LatestMajor: lets TShock's net9 apphost load on the
 #   .NET 10 shared framework. Validated previously (net6→net10 roll-forward).
+# - DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp: TShock 6.1.0 ships as a single-file
+#   apphost (PublishSingleFile=true) which unpacks its embedded native libs
+#   (notably sqlite) to disk at startup. Default extract dir is /, which is
+#   read-only on the chiseled base. /tmp is world-writable in chiseled and
+#   safe for ephemeral extract — the apphost will re-extract on every boot
+#   into /tmp/.net/TShock.Server/<hash>/.
 # - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT inherited =true from the chiseled
 #   base. We leave it true — chiseled doesn't ship ICU data and TShock's i18n
 #   uses .mo files that don't require .NET's globalization stack.
 # - DOTNET_RUNNING_IN_CONTAINER inherited =true.
 ENV DOTNET_ROLL_FORWARD=LatestMajor \
+    DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1
 
