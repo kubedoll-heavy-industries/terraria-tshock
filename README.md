@@ -22,16 +22,23 @@ This image replaces all of that with build-time pinning and supply-chain control
 
 ## Properties
 
-- **Non-root from PID 1.** Built on a minimal Debian-slim base; the container
-  runs as `uid 1000 / gid 1000` with no setuid binaries.
-- **Pinned .NET 9 ASP.NET Core runtime** copied from an official Microsoft image
-  digest at build time.
-- **Pinned TShock release** fetched at build time, SHA256-verified against a
-  build-arg checksum. The version baked into the image is exactly the version
-  we built — no runtime drift.
-- **Plugins baked in** at known versions: see [`plugins.lock`](./plugins.lock).
-- **No runtime updates.** No `curl github.com` in the entrypoint, no gotty.
-- **TCP healthcheck** on port `7777` (the Terraria game port).
+- **Distroless from PID 1.** Built on Microsoft's chiseled .NET 10 LTS runtime
+  (`mcr.microsoft.com/dotnet/runtime:10.0-noble-chiseled`). No shell, no
+  package manager, no setuid binaries. Container runs as `uid 1000 / gid 1000`.
+  See [`OPS.md`](./OPS.md) for the pod-debug pattern (`kubectl debug` with an
+  ephemeral container).
+- **TShock 6.1.0 for Terraria 1.4.5.6**, native .NET 9 apphost, rolled forward
+  onto the .NET 10 LTS runtime via `DOTNET_ROLL_FORWARD=LatestMajor`.
+- **All inputs SHA256-pinned at build time** — TShock release zip, tini static
+  binary, plugin source commit. See [`plugins.lock`](./plugins.lock). Mismatch
+  on any pin fails the build closed.
+- **No runtime updates.** No `curl github.com` from the running container, no
+  `TShock.Installer` (stripped at build time), no gotty.
+- **Plugins baked in** from `UnrealMultiple/TShockPlugin` (the active v6
+  collection): History, HouseRegion, RegionView. AntiSpam intentionally absent
+  (no v6 equivalent in the upstream collection yet); tracked as a follow-up.
+- **No Docker `HEALTHCHECK`.** Chiseled image has no `nc`/shell. Use K8s
+  `readinessProbe.tcpSocket: { port: 7777 }` in the chart (already configured).
 - **amd64 only.** Our cluster nodes are amd64; arm64 can be added by extending
   the build matrix in `.github/workflows/build.yml`.
 

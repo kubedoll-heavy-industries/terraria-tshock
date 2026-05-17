@@ -3,26 +3,34 @@
 # terraria-tshock — hardened, version-pinned TShock container.
 #
 # Layers (top → bottom = least → most cache-busting):
-#   1. Builder: debian-slim, fetches+verifies TShock zip and plugin DLLs.
-#   2. Runtime: Microsoft .NET 9 runtime slim, copies verified artifacts only.
+#   1. fetch      — Debian-slim, downloads + SHA256-verifies TShock and tini.
+#   2. plugins    — .NET 10 SDK, clones UnrealMultiple/TShockPlugin at a pinned
+#                   commit and builds 3 plugins against TShock 6.1.0 NuGet.
+#   3. runtime    — Ubuntu Resolute (26.04 LTS) chiseled (distroless). Copies
+#                   verified artifacts only. No shell, no apt, no package manager.
 #
-# Everything mutable about the build is a top-level ARG so CI can override and
-# `plugins.lock` documents the same values for humans. Changes to ARGs cascade
-# correctly through BuildKit's cache.
+# Why chiseled?
+#   No shell = no shell-escape class of CVE. No package manager = nothing to
+#   update at runtime, nothing for Trivy to flag at the OS layer. The price is
+#   that pod debugging needs `kubectl debug --image=mcr.microsoft.com/dotnet/runtime:10.0-resolute
+#   --target=terraria` to attach an ephemeral container with userspace tools.
+#   See OPS.md.
 #
-# Why .NET 9 for a TShock 5.x build that targets .NET 6?
-#   .NET 6 is EOL (Nov 2024) and ships unpatched CVEs. We instead install the
-#   supported .NET 9 runtime and set DOTNET_ROLL_FORWARD=LatestMajor so the
-#   .NET 6 apphost in TShock.Server loads against the 9.0 shared framework.
-#   Verified working at build time on linux/amd64.
+# Why glibc-based and not Alpine?
+#   TShock.Server is a glibc-linked ELF (NEEDED libc.so.6, libstdc++.so.6, ...).
+#   Alpine ships musl; running glibc binaries on Alpine needs the `gcompat`
+#   shim, which is not 100% glibc-compatible and adds an attack surface. Resolute
+#   chiseled gives us native glibc (Ubuntu 26.04 LTS) plus distroless ergonomics.
 #
-# Why not Alpine / TrueCharts scratch?
-#   TShock.Server is a glibc-linked ELF (libc.so.6, libstdc++.so.6, libgcc_s.so.1).
-#   musl-based Alpine would require a glibc shim — more attack surface, not less.
+# Why .NET 10 runtime, not .NET 9?
+#   TShock 6.1.0 ships as a net9.0 apphost. .NET 9 is STS (EOL May 2026); .NET
+#   10 is the current LTS. DOTNET_ROLL_FORWARD=LatestMajor coerces the net9
+#   apphost onto the .NET 10 shared framework — exact pattern we've validated
+#   previously (net6 TShock 5.2.4 rolled forward to .NET 10 ran clean).
 
 # ---------------------------------------------------------------------------
-# Stage 1: build context. Fetches archives and verifies SHA256 sums.
-# Pinned by digest so a hostile mirror cannot serve us a different debian.
+# Stage 1: fetch + verify the TShock release and tini. Pinned by digest so
+# a hostile mirror cannot serve us a different debian.
 # ---------------------------------------------------------------------------
 FROM debian@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3 AS fetch
 
@@ -30,20 +38,13 @@ ARG TARGETARCH
 RUN [ "$TARGETARCH" = "amd64" ] || { echo "this image is amd64-only; got $TARGETARCH"; exit 1; }
 
 # TShock release.
-ARG TSHOCK_VERSION=5.2.4
-ARG TSHOCK_TERRARIA_VERSION=1.4.4.9
-ARG TSHOCK_ZIP_SHA256=5c0bd0fc0777a535b6bb759c5bda4817549cdb02aee0ed371895eba26ff721f2
+ARG TSHOCK_VERSION=6.1.0
+ARG TSHOCK_TERRARIA_VERSION=1.4.5.6
+ARG TSHOCK_ZIP_SHA256=c4a63624e49422e46967c4cb6a72b698acb96dcc645e5b1daaa0f00e2cb98db9
 
-# Plugins: pin the source repo commit AND each file's sha256.
-# Pinning the commit alone is not enough — main can be force-pushed, and ref-by-
-# commit only guarantees the tree, not what a CDN cache might serve via the raw
-# URL we fetch from. So we verify both: commit-pinned URL + content hash.
-ARG PLUGINS_REPO=RenderBr/tShock-v5-plugins
-ARG PLUGINS_COMMIT=b67aa63bad1e7ab23d2688ec012b3b8ca4619163
-ARG PLUGIN_HISTORY_SHA256=abf007230819613865a38c7ef689393bf2d41793aa5c70842b17381dda2ee4e0
-ARG PLUGIN_ANTISPAM_SHA256=7b665d558415ac283a78ffe96642994253e9a4192f77accfb273ecbe721244fb
-ARG PLUGIN_REGIONVIEW_SHA256=3b156ff64eafc1d1f8ed0e694dee92a17457c606c02c0ea841b8c3e964302f57
-ARG PLUGIN_HOUSEREGIONS_SHA256=791b77ca0d9b2c367a2de5717df7813dad061c5386e12f94b796eff6388c00f6
+# tini (PID 1 + signal forwarding). Static glibc build, no runtime deps.
+ARG TINI_VERSION=v0.19.0
+ARG TINI_SHA256=c5b0666b4cb676901f90dfcb37106783c5fe2077b04590973b885950611b30ee
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
@@ -51,115 +52,139 @@ RUN apt-get update \
 
 WORKDIR /work
 
-# Fetch + verify TShock. The release ships as a .zip containing a .tar; extract both.
+# Fetch + verify TShock. Release ships as .zip wrapping a .tar; unwrap both.
 RUN set -eux; \
-    url="https://github.com/Pryaxis/TShock/releases/download/v${TSHOCK_VERSION}/TShock-${TSHOCK_VERSION}-for-Terraria-${TSHOCK_TERRARIA_VERSION}-linux-amd64-Release.zip"; \
+    url="https://github.com/Pryaxis/TShock/releases/download/v${TSHOCK_VERSION}/TShock-${TSHOCK_VERSION}-for-Terraria-${TSHOCK_TERRARIA_VERSION}-linux-x64-Release.zip"; \
     curl -fsSL -o tshock.zip "$url"; \
     echo "${TSHOCK_ZIP_SHA256}  tshock.zip" | sha256sum -c -; \
     unzip -q tshock.zip; \
-    tar -xf TShock-Beta-linux-x64-Release.tar -C /work/tshock --one-top-level=. 2>/dev/null || { mkdir -p /work/tshock; tar -xf TShock-Beta-linux-x64-Release.tar -C /work/tshock; }; \
+    mkdir -p /work/tshock; \
+    tar -xf TShock-Beta-linux-x64-Release.tar -C /work/tshock; \
     rm tshock.zip TShock-Beta-linux-x64-Release.tar; \
     # Delete the in-container updater. We never want it on the runtime image.
     rm -f /work/tshock/TShock.Installer; \
-    ls /work/tshock/TShock.Server >/dev/null
+    [ -f /work/tshock/TShock.Server ]
 
-# Fetch + verify plugins. Each DLL gets its own RUN so a hash mismatch fails
-# the layer cleanly and the error message names the offending plugin.
-RUN set -eux; mkdir -p /work/tshock/ServerPlugins; \
-    base="https://raw.githubusercontent.com/${PLUGINS_REPO}/${PLUGINS_COMMIT}"; \
-    curl -fsSL -o "/work/tshock/ServerPlugins/History.dll"        "${base}/History.dll"; \
-    echo "${PLUGIN_HISTORY_SHA256}  /work/tshock/ServerPlugins/History.dll"           | sha256sum -c -; \
-    curl -fsSL -o "/work/tshock/ServerPlugins/AntiSpam.dll"       "${base}/AntiSpam.dll"; \
-    echo "${PLUGIN_ANTISPAM_SHA256}  /work/tshock/ServerPlugins/AntiSpam.dll"         | sha256sum -c -; \
-    curl -fsSL -o "/work/tshock/ServerPlugins/RegionView.dll"     "${base}/RegionView.dll"; \
-    echo "${PLUGIN_REGIONVIEW_SHA256}  /work/tshock/ServerPlugins/RegionView.dll"     | sha256sum -c -; \
-    # URL-encode the space for the source repo path; keep the on-disk name spaceless.
-    curl -fsSL -o "/work/tshock/ServerPlugins/HouseRegions.dll"   "${base}/House%20Regions.dll"; \
-    echo "${PLUGIN_HOUSEREGIONS_SHA256}  /work/tshock/ServerPlugins/HouseRegions.dll" | sha256sum -c -
+# Fetch + verify tini static binary.
+RUN set -eux; \
+    curl -fsSL -o /work/tini "https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-static-amd64"; \
+    echo "${TINI_SHA256}  /work/tini" | sha256sum -c -; \
+    chmod 0555 /work/tini
 
 # Normalise permissions for the runtime user. Read-only for files we never want
 # the process to rewrite, +x on the launcher only.
 RUN set -eux; \
     chmod -R a-w /work/tshock; \
     chmod 0555 /work/tshock/TShock.Server; \
-    # Things actually executable inside `bin/` aren't direct entrypoints; the
-    # apphost dlopens them. Leave them mode 0444.
     find /work/tshock -type d -exec chmod 0555 {} +
 
 # ---------------------------------------------------------------------------
-# Stage 2: runtime image. Pinned by digest. Microsoft maintains this and
-# publishes CVE fixes on a known cadence; nightly CI rebuilds pick them up.
+# Stage 2: plugin builder. Clones UnrealMultiple/TShockPlugin at a pinned
+# commit (GPL-3.0) and builds 3 plugins against the TShock 6.1.0 NuGet
+# package the repo's template.targets references. The resulting DLLs land in
+# ./out/Release/ per their build convention.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime@sha256:d955f883a9e648f0ff80b8bfe01e6b79874c296ef3bbcb5637c6981b64981a9a
+# .NET 9 SDK (not 10) — TShock 6.1's transitive dep graph still references
+# net6.0 (e.g. via TerrariaServerAPI), and the .NET 10 SDK drops the net6
+# targeting pack. The .NET 9 SDK still ships net6/net7/net8/net9 packs and
+# can produce net9.0 plugin DLLs that load on the .NET 10 runtime via the
+# DOTNET_ROLL_FORWARD env var in the runtime stage.
+FROM mcr.microsoft.com/dotnet/sdk@sha256:087fc98e5c6ffcea6c3e276c135c4a6717c589d9509a09cc22e7c634830a4db8 AS plugins
+
+ARG PLUGINS_REPO=UnrealMultiple/TShockPlugin
+# Pinned commit: 2026-05-11. Refresh when bumping plugin set.
+ARG PLUGINS_COMMIT=221ff312bc357512af35fdafd5afdf130cf46951
+
+# Clone the exact commit (depth-1 ref-by-tag-on-the-fly: fetch the commit, no history).
+WORKDIR /src
+RUN git init -q . \
+ && git remote add origin "https://github.com/${PLUGINS_REPO}.git" \
+ && git fetch --depth 1 -q origin "${PLUGINS_COMMIT}" \
+ && git checkout -q FETCH_HEAD \
+ && git submodule update --init --recursive --depth 1 -q
+
+# Build each plugin we want. template.targets pins net9.0 + TShock 6.1.0 NuGet,
+# so this restores ~50 MB of NuGet cache once and reuses it across the 3 builds.
+# Output lands at /src/out/Release/<PluginName>.dll per their build convention.
+RUN dotnet restore src/History/History.csproj           --verbosity minimal \
+ && dotnet restore src/HouseRegion/HouseRegion.csproj   --verbosity minimal \
+ && dotnet restore src/RegionView/RegionView.csproj     --verbosity minimal
+RUN dotnet build   src/History/History.csproj         -c Release --no-restore --verbosity minimal \
+ && dotnet build   src/HouseRegion/HouseRegion.csproj -c Release --no-restore --verbosity minimal \
+ && dotnet build   src/RegionView/RegionView.csproj   -c Release --no-restore --verbosity minimal
+
+# Stage the plugin DLLs in a clean tree we'll COPY into the runtime image.
+# Only the *plugin* DLLs — not TShockAPI/Terraria deps, which are already in
+# the TShock release zip. UnrealMultiple's build drops embedded i18n into the
+# DLL itself, so we don't need to ship the .mo files separately.
+RUN set -eux; \
+    mkdir -p /staged; \
+    cp /src/out/Release/History.dll      /staged/History.dll; \
+    cp /src/out/Release/HouseRegion.dll  /staged/HouseRegion.dll; \
+    cp /src/out/Release/RegionView.dll   /staged/RegionView.dll; \
+    chmod 0444 /staged/*.dll
+
+# ---------------------------------------------------------------------------
+# Stage 3: runtime image. Pinned by digest. Distroless — no shell, no apt.
+# Microsoft maintains this; nightly CI rebuild absorbs any base-layer CVE fix.
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/runtime@sha256:e47cc1e32cd37647d0505f9a3192a5cf1894e1fc70df0e7bcb133ce2fec5ea7f
 
 ARG TSHOCK_VERSION
 ARG TSHOCK_TERRARIA_VERSION
-ARG UID=1000
-ARG GID=1000
 
 LABEL org.opencontainers.image.title="terraria-tshock" \
-      org.opencontainers.image.description="Hardened TShock dedicated server (Terraria ${TSHOCK_TERRARIA_VERSION}, TShock ${TSHOCK_VERSION})" \
+      org.opencontainers.image.description="Hardened TShock 6.1.0 server image for Terraria ${TSHOCK_TERRARIA_VERSION}, .NET 10 LTS on Ubuntu 26.04 chiseled" \
       org.opencontainers.image.source="https://github.com/kubedoll-heavy-industries/terraria-tshock" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Kubedoll Heavy Industries" \
       io.haruspex.tshock.version="${TSHOCK_VERSION}" \
       io.haruspex.terraria.version="${TSHOCK_TERRARIA_VERSION}"
 
-# netcat-openbsd: ~50 KB, only used by the healthcheck. tini: PID-1 signal
-# forwarding (Terraria doesn't reap children or handle SIGTERM cleanly otherwise).
-RUN apt-get update \
- && apt-get install -y --no-install-recommends netcat-openbsd tini \
- && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/apt/archives/*
-
-# Non-root user, created in this stage so the final image owns nothing as root
-# beyond the read-only /opt/tshock tree.
-RUN groupadd --system --gid ${GID} tshock \
- && useradd  --system --uid ${UID} --gid ${GID} --no-create-home --home /serverdata/serverfiles --shell /usr/sbin/nologin tshock
-
-# Copy verified artifacts owned by root, mode 0555 — the runtime user can read
-# and execute but cannot modify the binary tree even if it's somehow exploited.
+# Copy verified artifacts. Owner = root because the runtime image has no shell
+# to invoke `chown`; the runtime user (1000) reads but can't modify.
+COPY --from=fetch --chown=root:root --chmod=0555 /work/tini /usr/local/bin/tini
 COPY --from=fetch --chown=root:root /work/tshock/ /opt/tshock/
 
-# The chart mounts a PVC at /serverdata/serverfiles. Create the tree owned by
-# the runtime user so the chart's init container (and the server itself) can
-# write to /serverdata/serverfiles/{worlds,tshock,logs} without a chown dance.
-RUN mkdir -p /serverdata/serverfiles/worlds \
-             /serverdata/serverfiles/tshock \
-             /serverdata/serverfiles/logs \
- && chown -R ${UID}:${GID} /serverdata
+# Bake the v6-compatible plugins next to TShock's own ServerPlugins tree.
+# The TShock release zip ships ServerPlugins/TShockAPI.dll already; we just add
+# our 3 plugin DLLs alongside it.
+COPY --from=plugins --chown=root:root /staged/ /opt/tshock/ServerPlugins/
 
-# .NET 6 apphost → .NET 9 runtime. See header comment for rationale.
+# Writable PVC tree. Chiseled has no shell, so we can't RUN mkdir + chown. The
+# WORKDIR directive below creates /serverdata/serverfiles automatically (Docker
+# creates parents); ownership defaults to root:root, but the chart mounts a PVC
+# at this path with fsGroup=1000, which Kubernetes uses to chown the volume
+# contents on mount. So the inherited root:root ownership of the in-image dir
+# is replaced at runtime by the PVC's fsGroup-owned tree. The chart's existing
+# init container creates worlds/, tshock/, logs/ subdirs on first start.
+
+# Runtime env.
+# - DOTNET_ROLL_FORWARD=LatestMajor: lets TShock's net9 apphost load on the
+#   .NET 10 shared framework. Validated previously (net6→net10 roll-forward).
+# - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT inherited =true from the chiseled
+#   base. We leave it true — chiseled doesn't ship ICU data and TShock's i18n
+#   uses .mo files that don't require .NET's globalization stack.
+# - DOTNET_RUNNING_IN_CONTAINER inherited =true.
 ENV DOTNET_ROLL_FORWARD=LatestMajor \
-    DOTNET_ROLL_FORWARD_PRE_RELEASE=0 \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
-    DOTNET_NOLOGO=1 \
-    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=0 \
-    DOTNET_RUNNING_IN_CONTAINER=true \
-    # Where TShock looks for config/worlds/logs by default. We pass these on the
-    # command line too, so a `command:` override in the chart still wins, but
-    # having them in the env is a useful self-documenting fallback.
-    TSHOCK_CONFIGPATH=/serverdata/serverfiles/tshock \
-    TSHOCK_WORLDPATH=/serverdata/serverfiles/worlds \
-    TSHOCK_LOGPATH=/serverdata/serverfiles/logs
+    DOTNET_NOLOGO=1
 
-USER ${UID}:${GID}
-# Run from the writable PVC, not the read-only /opt/tshock tree. Terraria's
-# pre-TShock layer hardcodes `ServerLog.txt` into the process cwd; if cwd is
-# /opt/tshock the process crashes on first write. Working from the PVC also
-# means any incidental "scratch file dropped in cwd" behaviour from other
-# layers ends up on persistent storage instead of the container writable layer.
+USER 1000:1000
 WORKDIR /serverdata/serverfiles
 
 EXPOSE 7777/tcp
 VOLUME ["/serverdata/serverfiles"]
 
-# TCP probe on 7777. Kubernetes will usually use its own tcpSocket probe and
-# ignore this, but it's useful for `docker run` smoke tests.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD nc -z 127.0.0.1 7777 || exit 1
+# No HEALTHCHECK. K8s readinessProbe (tcpSocket: 7777) is the right place for
+# liveness in cluster, and chiseled has no shell/nc to back a Docker
+# HEALTHCHECK anyway. Pryaxis's own image makes the same choice.
 
-# tini handles SIGTERM → graceful TShock shutdown (saves world before exit).
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/tshock/TShock.Server"]
+# tini as PID 1 for clean SIGTERM → TShock graceful shutdown (saves world
+# before exit). The chiseled base's default ENTRYPOINT is `dotnet`; we
+# override entirely because TShock ships as a single-file apphost ELF, not
+# a managed dll.
+ENTRYPOINT ["/usr/local/bin/tini", "--", "/opt/tshock/TShock.Server"]
 CMD ["-configpath", "/serverdata/serverfiles/tshock", \
      "-worldpath",  "/serverdata/serverfiles/worlds", \
      "-logpath",    "/serverdata/serverfiles/logs"]

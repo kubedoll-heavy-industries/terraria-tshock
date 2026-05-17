@@ -5,76 +5,104 @@
 # file and the matching ARG default in Dockerfile when bumping a pin.
 #
 # Format: YAML. Field meanings:
-#   sha256 — SHA-256 of the file as fetched (NOT the git-blob sha1 GitHub shows
-#            in its content API; use `sha256sum <file>` after downloading).
-#   source — exact commit-pinned raw URL the build will fetch.
+#   sha256 — SHA-256 of the file as fetched.
+#   source — exact commit-pinned URL the build will fetch.
 
 base_images:
-  builder:
+  fetcher:
     image: docker.io/library/debian
     tag: 12-slim
     digest: sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
+  plugin_builder:
+    image: mcr.microsoft.com/dotnet/sdk
+    tag: "9.0"
+    digest: sha256:087fc98e5c6ffcea6c3e276c135c4a6717c589d9509a09cc22e7c634830a4db8
+    notes: |
+      .NET 9 SDK (not 10). TShock 6.1's transitive dep graph references net6.0
+      (via TerrariaServerAPI etc.); the .NET 10 SDK dropped the net6 targeting
+      pack, so restoring against TShock 6.1 NuGet fails on net10 SDK with
+      "[MSBuild]::GetTargetFrameworkVersion(net6.0) cannot be evaluated". The
+      .NET 9 SDK still ships net6/net7/net8/net9 packs and produces net9.0
+      plugin DLLs that load on the .NET 10 runtime via roll-forward.
   runtime:
     image: mcr.microsoft.com/dotnet/runtime
-    tag: 9.0-bookworm-slim
-    digest: sha256:d955f883a9e648f0ff80b8bfe01e6b79874c296ef3bbcb5637c6981b64981a9a
+    tag: 10.0-resolute-chiseled
+    digest: sha256:e47cc1e32cd37647d0505f9a3192a5cf1894e1fc70df0e7bcb133ce2fec5ea7f
     notes: |
-      Provides .NET 9.0.16. TShock 5.2.4's apphost targets .NET 6 (EOL); we
-      coerce it onto 9.x via DOTNET_ROLL_FORWARD=LatestMajor. When TShock 6.x
-      (.NET 9 native) is stable for our Terraria target version, drop the
-      roll-forward env var.
+      .NET 10 LTS runtime on Ubuntu 26.04 LTS (Resolute) chiseled (distroless).
+      No shell, no package manager, no apt. Newest available LTS base — 26.04
+      shipped April 2026 and Microsoft published the chiseled variant promptly.
+      TShock 6.1.0 is a native net9.0 apphost; we coerce onto the .NET 10
+      framework via DOTNET_ROLL_FORWARD=LatestMajor.
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true is inherited from the base —
+      chiseled ships without ICU; TShock's i18n uses .mo files that don't
+      need .NET's globalization stack, so this is fine.
 
 tshock:
-  version: 5.2.4
-  terraria_version: 1.4.4.9
+  version: 6.1.0
+  terraria_version: 1.4.5.6
   channel: stable
   notes: |
-    Chosen because the cluster's existing world is Terraria 1.4.4.9. TShock 6.x
-    requires Terraria 1.4.5.x; bumping there is a separate migration (world
-    save format change). 5.2.4 is the latest 5.x stable (2025-05-09).
-  asset: TShock-5.2.4-for-Terraria-1.4.4.9-linux-amd64-Release.zip
-  source: https://github.com/Pryaxis/TShock/releases/download/v5.2.4/TShock-5.2.4-for-Terraria-1.4.4.9-linux-amd64-Release.zip
-  sha256: 5c0bd0fc0777a535b6bb759c5bda4817549cdb02aee0ed371895eba26ff721f2
-  size: 25132958
+    First .NET 9-native TShock for Terraria 1.4.5.6, released 2026-03-11. Bumps
+    out of TShock 5.x (which targeted .NET 6 EOL + had vulnerable transitive
+    deps Trivy flagged). 6.x changes the plugin ABI — see plugins section
+    below for the sourcing change.
+  asset: TShock-6.1.0-for-Terraria-1.4.5.6-linux-x64-Release.zip
+  source: https://github.com/Pryaxis/TShock/releases/download/v6.1.0/TShock-6.1.0-for-Terraria-1.4.5.6-linux-x64-Release.zip
+  sha256: c4a63624e49422e46967c4cb6a72b698acb96dcc645e5b1daaa0f00e2cb98db9
+  size: 34002037
+
+tini:
+  version: v0.19.0
+  notes: |
+    Static glibc-linked PID 1 for clean SIGTERM → graceful TShock shutdown
+    (saves world before exit). Single static binary, no runtime deps; copied
+    into the chiseled image at /usr/local/bin/tini.
+  source: https://github.com/krallin/tini/releases/download/v0.19.0/tini-static-amd64
+  sha256: c5b0666b4cb676901f90dfcb37106783c5fe2077b04590973b885950611b30ee
+  size: 870496
 
 plugins:
-  repo: RenderBr/tShock-v5-plugins
-  commit: b67aa63bad1e7ab23d2688ec012b3b8ca4619163
-  files:
-    - name: History.dll
-      install_as: ServerPlugins/History.dll
-      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/History.dll
-      sha256: abf007230819613865a38c7ef689393bf2d41793aa5c70842b17381dda2ee4e0
-      size: 52224
-    - name: AntiSpam.dll
-      install_as: ServerPlugins/AntiSpam.dll
-      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/AntiSpam.dll
-      sha256: 7b665d558415ac283a78ffe96642994253e9a4192f77accfb273ecbe721244fb
-      size: 11264
-    - name: RegionView.dll
-      install_as: ServerPlugins/RegionView.dll
-      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/RegionView.dll
-      sha256: 3b156ff64eafc1d1f8ed0e694dee92a17457c606c02c0ea841b8c3e964302f57
-      size: 26624
-    # Renamed from "House Regions.dll" → HouseRegions.dll inside the image to
-    # avoid a path with a literal space (works fine, but trips shell scripts
-    # and breaks `find -name` predicates).
-    - name: House Regions.dll
-      install_as: ServerPlugins/HouseRegions.dll
-      source: https://raw.githubusercontent.com/RenderBr/tShock-v5-plugins/b67aa63bad1e7ab23d2688ec012b3b8ca4619163/House%20Regions.dll
-      sha256: 791b77ca0d9b2c367a2de5717df7813dad061c5386e12f94b796eff6388c00f6
-      size: 59904
+  source_repo: UnrealMultiple/TShockPlugin
+  source_commit: 221ff312bc357512af35fdafd5afdf130cf46951
+  source_date: 2026-05-11
+  license: GPL-3.0
+  build_target: TShock 6.1.0 NuGet (pinned in template.targets), net9.0
+  notes: |
+    Plugins are built from source in a multi-stage builder against the TShock
+    6.1.0 NuGet package — we do NOT consume UnrealMultiple's prebuilt Release
+    zip (last published 2024-04, predates TShock 6).
 
-# Plugins deliberately NOT included on the first cut:
-#   - TerrariaChatRelay: needs a Discord bot token (and the chart can't
-#     currently feed secrets into the bake). Opt-in via overlay later.
+    Sourcing change vs the 5.x image: RenderBr/tShock-v5-plugins is explicitly
+    v5-only and has no v6 sibling. UnrealMultiple/TShockPlugin is the active
+    v6 plugin collection (134 plugins, GPL-3.0, GitHub master updated weekly).
+  baked:
+    - name: History
+      install_as: ServerPlugins/History.dll
+      source: https://github.com/UnrealMultiple/TShockPlugin/tree/221ff312bc357512af35fdafd5afdf130cf46951/src/History
+      replaces: RenderBr/tShock-v5-plugins/History.dll (v5 image only)
+    - name: HouseRegion
+      install_as: ServerPlugins/HouseRegion.dll
+      source: https://github.com/UnrealMultiple/TShockPlugin/tree/221ff312bc357512af35fdafd5afdf130cf46951/src/HouseRegion
+      replaces: RenderBr/tShock-v5-plugins/House Regions.dll (v5 image only)
+    - name: RegionView
+      install_as: ServerPlugins/RegionView.dll
+      source: https://github.com/UnrealMultiple/TShockPlugin/tree/221ff312bc357512af35fdafd5afdf130cf46951/src/RegionView
+      replaces: RenderBr/tShock-v5-plugins/RegionView.dll (v5 image only)
+  intentionally_absent:
+    - name: AntiSpam
+      reason: |
+        UnrealMultiple's 134-plugin collection has no chat-rate-limit
+        equivalent for TShock 6.x. Day-one image ships without anti-spam;
+        sourcing a v6-compatible replacement is a tracked follow-up.
 
 runtime_layout:
-  /opt/tshock/TShock.Server: entrypoint (ELF apphost, .NET 6 → rolled forward to .NET 9)
+  /opt/tshock/TShock.Server: entrypoint (ELF apphost, net9.0 → rolled forward to .NET 10)
   /opt/tshock/ServerPlugins/: baked plugin DLLs (read-only)
   /opt/tshock/bin/: TShock + Terraria managed assemblies (read-only)
   /opt/tshock/i18n/: TShock translations (read-only)
   /opt/tshock/GeoIP.dat: GeoIP database shipped with TShock (read-only)
-  /serverdata/serverfiles/worlds/: chart-mounted PVC (writable, uid 1000)
+  /serverdata/serverfiles/worlds/: chart-mounted PVC (writable, uid 1000 via fsGroup)
   /serverdata/serverfiles/tshock/: chart-mounted PVC (writable; holds config.json + sqlite)
   /serverdata/serverfiles/logs/: chart-mounted PVC (writable)
+  /usr/local/bin/tini: PID 1 reaper (static binary)
