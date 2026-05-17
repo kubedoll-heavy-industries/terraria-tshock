@@ -191,7 +191,10 @@ jobs:
               exit 1
           fi
           docker rm -f "$NAME" >/dev/null
-          rm -rf "$RUNNER_TEMP/serverdata-baseline"
+          # Files inside the volume were created by the in-container uid 1000;
+          # the runner can't unlink them directly. Use a privileged docker run
+          # to clean up. Failure here is non-fatal.
+          docker run --rm -v "$RUNNER_TEMP/serverdata-baseline:/d" alpine:3 rm -rf /d || true
 
       - name: Smoke test (hardened — matches K8s podSpec)
         env:
@@ -234,7 +237,7 @@ jobs:
               exit 1
           fi
           docker rm -f "$NAME" >/dev/null
-          rm -rf "$RUNNER_TEMP/serverdata-hardened"
+          docker run --rm -v "$RUNNER_TEMP/serverdata-hardened:/d" alpine:3 rm -rf /d || true
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.7.0
