@@ -96,8 +96,14 @@ RUN set -eux; \
 #
 # AntiSpam: no v6-compatible equivalent in UnrealMultiple's collection (or
 # anywhere we could find). Skipped — recorded in plugins.lock.
+#
+# SDK pin: must be 9.0.300+ (Roslyn 5.x). Upstream CI uses 9.0.314 (May 2026
+# servicing release). Earlier 9.0.x SDKs ship Roslyn 4.14 which refuses to
+# load SourceGen with CS9057 ("analyzer references compiler 5.3.0, runtime
+# is 4.14"). The floating `:9.0` tag resolved to a too-old patch and broke
+# our first build attempt.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS plugins
+FROM mcr.microsoft.com/dotnet/sdk:9.0.314 AS plugins
 
 # Pin the UnrealMultiple/TShockPlugin commit; bump deliberately, never float.
 ARG TSHOCK_PLUGINS_COMMIT=221ff312bc357512af35fdafd5afdf130cf46951
