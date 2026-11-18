@@ -71,3 +71,17 @@ pin = build fails closed.
 When bumping TShock or the plugin source commit, update **both** the matching
 `ARG` default in `Dockerfile` AND the entry in `plugins.lock`. CI doesn't
 parse plugins.lock for build inputs — it's the human-readable mirror.
+
+## Image signing
+
+Images are signed with cosign using a key held in 1Password
+("cosign terraria-tshock signing key"). The public half lives at `cosign.pub`.
+
+```sh
+cosign verify --key cosign.pub \
+  ghcr.io/kubedoll-heavy-industries/terraria-tshock@sha256:<digest>
+```
+
+This replaced the keyless GitHub Actions signature when that workflow's
+self-hosted runner was retired. Re-sign after every rebuild; an unsigned
+digest is a failed release.
