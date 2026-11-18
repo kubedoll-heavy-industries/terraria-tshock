@@ -33,7 +33,7 @@
 # Stage 1: fetch + verify the TShock release and tini. Pinned by digest so
 # a hostile mirror cannot serve us a different debian.
 # ---------------------------------------------------------------------------
-FROM debian@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3 AS fetch
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS fetch
 
 ARG TARGETARCH
 RUN [ "$TARGETARCH" = "amd64" ] || { echo "this image is amd64-only; got $TARGETARCH"; exit 1; }
@@ -102,7 +102,7 @@ RUN set -eux; \
 # digest. Microsoft maintains this; nightly CI rebuild absorbs any base-layer
 # CVE fix.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime@sha256:20b918a3f49c838e57179475a16df93353c2f282be801e0135b699846bccc605
+FROM mcr.microsoft.com/dotnet/runtime:10.0.9-resolute@sha256:61be922d71b859d58cad6f1b6a8d05aa83d8c7b455f6a1e3058ae42d6735b576
 
 ARG TSHOCK_VERSION
 ARG TSHOCK_TERRARIA_VERSION
