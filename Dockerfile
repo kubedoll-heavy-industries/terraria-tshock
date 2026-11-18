@@ -102,7 +102,7 @@ RUN set -eux; \
 # digest. Microsoft maintains this; nightly CI rebuild absorbs any base-layer
 # CVE fix.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime:10.0.9-resolute@sha256:61be922d71b859d58cad6f1b6a8d05aa83d8c7b455f6a1e3058ae42d6735b576
+FROM mcr.microsoft.com/dotnet/runtime:10.0.15-resolute@sha256:1a529eae6d7c7de8970104c758a597a3dc7a9af1e850ce6823f735f72e2f9a89
 
 ARG TSHOCK_VERSION
 ARG TSHOCK_TERRARIA_VERSION
@@ -115,8 +115,8 @@ LABEL org.opencontainers.image.title="terraria-tshock" \
       io.haruspex.tshock.version="${TSHOCK_VERSION}" \
       io.haruspex.terraria.version="${TSHOCK_TERRARIA_VERSION}"
 
-# netcat-openbsd: ~50 KB, only used by a future docker-side HEALTHCHECK or
-# operator smoke tests. tini handles PID 1 + SIGTERM forwarding.
+# tini handles PID 1 + SIGTERM forwarding; liveness is the Kubernetes TCP
+# probe, so the image carries no health binary of its own.
 # Set up uid 1000 as 'tshock' (Resolute's adduser ships as a Perl shim that
 # wants gettext; --no-create-home + --gecos="" + --disabled-password keeps it
 # light). Trim apt artefacts at the end so Trivy doesn't flag stale pkg meta.
@@ -124,9 +124,7 @@ LABEL org.opencontainers.image.title="terraria-tshock" \
 # secondary groups (adm, dialout, cdrom, sudo, audio, video, plugdev). Remove
 # it cleanly first so the 1000:1000 slot is free, then create our minimal
 # 'tshock' user with no secondary groups and a nologin shell.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends netcat-openbsd \
- && userdel --remove ubuntu 2>/dev/null || true \
+RUN userdel --remove ubuntu 2>/dev/null || true \
  && groupadd --system --gid 1000 tshock \
  && useradd  --system --uid 1000 --gid 1000 --no-create-home \
              --home /serverdata/serverfiles --shell /usr/sbin/nologin tshock \
@@ -135,7 +133,7 @@ RUN apt-get update \
  # -33814, -39820, -39836, -42499) that the base image ships with. Remove it
  # to eliminate the findings cleanly until MS refreshes the base digest.
  && rm -f /usr/bin/pebble \
- && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/apt/archives/*
+ && rm -rf /var/log/* /var/cache/apt/archives/*
 
 # Copy verified artifacts. Owner = root, mode = read-only: the runtime user
 # (uid 1000) can read and execute but cannot modify the binary tree even if
@@ -186,12 +184,6 @@ WORKDIR /serverdata/serverfiles
 
 EXPOSE 7777/tcp
 VOLUME ["/serverdata/serverfiles"]
-
-# TCP probe on 7777. K8s readinessProbe (tcpSocket: 7777) is still the
-# authoritative liveness check in cluster; this HEALTHCHECK is for `docker run`
-# smoke tests and operator one-offs.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD nc -z 127.0.0.1 7777 || exit 1
 
 # tini as PID 1 for clean SIGTERM → TShock graceful shutdown (saves world
 # before exit). We override the base's default ENTRYPOINT entirely because
