@@ -21,9 +21,8 @@ jobs:
       - name: install pinned scanners
         run: |
           set -euo pipefail
-          BIN="$HOME/.local/bin"
+          BIN=/tmp/bin
           mkdir -p "$BIN"
-          echo "$BIN" >> "$GITHUB_PATH"
           GRYPE_VERSION=v0.122.1
           GRYPE_BARE="${GRYPE_VERSION#v}"
           curl -fsSL -o "/tmp/grype_${GRYPE_BARE}_linux_amd64.tar.gz" \
@@ -65,12 +64,14 @@ jobs:
       - name: scan
         run: |
           set -euo pipefail
+          export PATH="/tmp/bin:$PATH"
           IMG="ghcr.io/kubedoll-heavy-industries/terraria-tshock@${DIGEST}"
           grype "$IMG" --fail-on critical --output table
 
       - name: sign
         run: |
           set -euo pipefail
+          export PATH="/tmp/bin:$PATH"
           echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 -d > /tmp/cosign.key
           COSIGN_PASSWORD="${{ secrets.COSIGN_PASSWORD }}" \
             cosign sign --yes --key /tmp/cosign.key \
