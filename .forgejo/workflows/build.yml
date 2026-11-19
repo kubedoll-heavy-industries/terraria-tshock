@@ -21,6 +21,9 @@ jobs:
       - name: install pinned scanners
         run: |
           set -euo pipefail
+          BIN="$HOME/.local/bin"
+          mkdir -p "$BIN"
+          echo "$BIN" >> "$GITHUB_PATH"
           GRYPE_VERSION=v0.122.1
           GRYPE_BARE="${GRYPE_VERSION#v}"
           curl -fsSL -o "/tmp/grype_${GRYPE_BARE}_linux_amd64.tar.gz" \
@@ -28,16 +31,16 @@ jobs:
           curl -fsSL -o /tmp/grype.sha256 \
             "https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}/grype_${GRYPE_BARE}_checksums.txt"
           (cd /tmp && grep "grype_${GRYPE_BARE}_linux_amd64.tar.gz$" grype.sha256 | sha256sum -c -)
-          tar -xzf "/tmp/grype_${GRYPE_BARE}_linux_amd64.tar.gz" -C /usr/local/bin grype
+          tar -xzf "/tmp/grype_${GRYPE_BARE}_linux_amd64.tar.gz" -C "$BIN" grype
 
           COSIGN_VERSION=v3.1.4
-          curl -fsSL -o /usr/local/bin/cosign-linux-amd64 \
+          curl -fsSL -o "$BIN/cosign-linux-amd64" \
             "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
           curl -fsSL -o /tmp/cosign.sha256 \
             "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt"
-          (cd /usr/local/bin && grep "cosign-linux-amd64$" /tmp/cosign.sha256 | sha256sum -c -)
-          chmod +x /usr/local/bin/cosign-linux-amd64
-          mv /usr/local/bin/cosign-linux-amd64 /usr/local/bin/cosign
+          (cd "$BIN" && grep "cosign-linux-amd64$" /tmp/cosign.sha256 | sha256sum -c -)
+          chmod +x "$BIN/cosign-linux-amd64"
+          mv "$BIN/cosign-linux-amd64" "$BIN/cosign"
           grype version | head -1
           cosign version | grep GitVersion
 
