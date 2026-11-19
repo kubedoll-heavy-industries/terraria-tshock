@@ -23,6 +23,7 @@ jobs:
           set -euo pipefail
           BIN=/tmp/bin
           mkdir -p "$BIN"
+          export PATH="$BIN:$PATH"
           GRYPE_VERSION=v0.122.1
           GRYPE_BARE="${GRYPE_VERSION#v}"
           curl -fsSL -o "/tmp/grype_${GRYPE_BARE}_linux_amd64.tar.gz" \
